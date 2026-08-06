@@ -1,0 +1,142 @@
+{
+  "version": 4,
+  "network": "GenLayer Bradbury Testnet",
+  "chainId": 4221,
+  "rpc": "https://rpc-bradbury.genlayer.com",
+  "explorer": "https://explorer-bradbury.genlayer.com",
+  "relayer": "0x320797a9938170961852a51b176eC6a410EBfdc8",
+  "contract": "genlayer/contracts/PredictionMarket.py",
+  "note": "One PredictionMarket per finalized resolver in bradbury-v2.json. Each market lists every deployment attempt, because Bradbury was congested during this run: full-consensus deployments sat ~239 blocks before being processed and stalled in commit/reveal, while leader-only deployments were picked up on the next block. `address` is filled in only from an attempt that reached FINALIZED, and `npm run genlayer:finalize` is what fills it. A predicted address from a receipt is never recorded.",
+  "parameters": {
+    "feeBps": 200,
+    "challengeWindowSeconds": 600,
+    "minChallengeStakeWei": "100000000000000000",
+    "disputeResolver": "0x0000000000000000000000000000000000000000"
+  },
+  "markets": {
+    "numeric": {
+      "marketId": "bradbury-v2-numeric-smoke",
+      "resolver": "0xa0bf8Abe38cDa8E1dB92040a3823C4b810Cdd2b7",
+      "address": "0x13b407ddA155e733Fb42089f5D8E4f99CDD04eFB",
+      "attempts": [
+        {
+          "deploymentTx": "0x39b1da72d005c04d89e34d621f5d0fa8a4f9cdebb45ebbd641af62d305b093a4",
+          "leaderOnly": false,
+          "status": "VALIDATORS_TIMEOUT",
+          "execution": "FINISHED_WITH_RETURN",
+          "final": false,
+          "callable": false
+        },
+        {
+          "deploymentTx": "0xe0fe42d9b72a7bd1e0cf604915ed1f9d36dbc0c2c75d4f7bbe2cba5accbb5e97",
+          "leaderOnly": true,
+          "status": "FINALIZED",
+          "execution": "FINISHED_WITH_RETURN",
+          "final": true,
+          "callable": true
+        }
+      ],
+      "checkedAt": "2026-08-06T00:04:54.452Z",
+      "callable": true,
+      "final": true,
+      "deployedBy": {
+        "deploymentTx": "0xe0fe42d9b72a7bd1e0cf604915ed1f9d36dbc0c2c75d4f7bbe2cba5accbb5e97",
+        "leaderOnly": true,
+        "status": "FINALIZED"
+      },
+      "bindingVerified": true,
+      "observedOutcome": {
+        "preliminary": "PENDING",
+        "final": "PENDING"
+      }
+    },
+    "structured": {
+      "marketId": "bradbury-v2-structured-smoke",
+      "resolver": "0x6E5066c43D8F381fAb2a994f5F3433E6872d6fdc",
+      "address": "0xAC6F7B9c059Ad6190d74399c3311dFEEDe149C0b",
+      "attempts": [
+        {
+          "deploymentTx": "0xdd3042186ed13f76cb5c593defe23c644f10752dc89be4473013489145e69c11",
+          "leaderOnly": false,
+          "status": "FINALIZED",
+          "execution": "NOT_VOTED",
+          "final": true
+        },
+        {
+          "deploymentTx": "0x8bfb3b47c380bc7fba34126518cf6ed15b7c8b3b7eaee6bacc6c86ba0e377359",
+          "leaderOnly": true,
+          "status": "FINALIZED",
+          "execution": "FINISHED_WITH_RETURN",
+          "final": true,
+          "callable": false
+        },
+        {
+          "deploymentTx": "0xc4a42baa20d8bfd463a76ba3cf433c2c097bedd12b3ab69860a5dda606763fbd",
+          "leaderOnly": true,
+          "status": "FINALIZED",
+          "execution": "FINISHED_WITH_RETURN",
+          "final": true,
+          "callable": false
+        },
+        {
+          "deploymentTx": "0x726690d4d63d53d1039ff2b086f60afa1aa280cb08419b52ca66de3f04d9867b",
+          "leaderOnly": true,
+          "status": "FINALIZED",
+          "execution": "FINISHED_WITH_RETURN",
+          "final": true,
+          "callable": true
+        }
+      ],
+      "checkedAt": "2026-08-06T00:04:54.452Z",
+      "callable": true,
+      "final": true,
+      "deployedBy": {
+        "deploymentTx": "0x726690d4d63d53d1039ff2b086f60afa1aa280cb08419b52ca66de3f04d9867b",
+        "leaderOnly": true,
+        "status": "FINALIZED"
+      },
+      "bindingVerified": true,
+      "observedOutcome": {
+        "preliminary": "PENDING",
+        "final": "PENDING"
+      }
+    },
+    "judgment": {
+      "marketId": "bradbury-v2-judgment-smoke",
+      "resolver": "0xaC520A14258c8af8d6Edf3937280F6B183120E7e",
+      "address": "0xA073ff16703d166015614Aec6DB5A7E721C18F90",
+      "attempts": [
+        {
+          "deploymentTx": "0xdc5cb8febb35b0f7476e004243f62278d7d568e12b46632e0343dc2f9eebf226",
+          "leaderOnly": false,
+          "status": "FINALIZED",
+          "execution": "FINISHED_WITH_RETURN",
+          "final": true,
+          "callable": false
+        },
+        {
+          "deploymentTx": "0xa484b60e5025ad25ee21add60d4f2c05bbc876a079de538506da5846dbca4ffc",
+          "leaderOnly": true,
+          "status": "FINALIZED",
+          "execution": "FINISHED_WITH_RETURN",
+          "final": true,
+          "callable": true
+        }
+      ],
+      "checkedAt": "2026-08-06T00:04:54.452Z",
+      "callable": true,
+      "final": true,
+      "deployedBy": {
+        "deploymentTx": "0xa484b60e5025ad25ee21add60d4f2c05bbc876a079de538506da5846dbca4ffc",
+        "leaderOnly": true,
+        "status": "FINALIZED"
+      },
+      "bindingVerified": true,
+      "observedOutcome": {
+        "preliminary": "PENDING",
+        "final": "PENDING"
+      }
+    }
+  },
+  "checkedAt": "2026-08-06T00:04:54.452Z"
+}

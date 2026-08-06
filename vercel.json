@@ -1,0 +1,16 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "vite",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "functions": {
+    "api/index.js": { "maxDuration": 60 }
+  },
+  "rewrites": [
+    { "source": "/health", "destination": "/api?route=health" },
+    { "source": "/v1/:path*", "destination": "/api?route=v1/:path*" },
+    { "source": "/create", "destination": "/index.html" },
+    { "source": "/portfolio", "destination": "/index.html" },
+    { "source": "/markets/:id", "destination": "/index.html" }
+  ]
+}

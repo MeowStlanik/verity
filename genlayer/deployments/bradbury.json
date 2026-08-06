@@ -1,0 +1,26 @@
+{
+  "note": "STALE/INCOMPATIBLE: v2 requires per-market market_binding, resolver_config, observation_time and numeric timestamp paths. Never attach these demo addresses to a newly created market.",
+  "network": "GenLayer Bradbury Testnet",
+  "chainId": 4221,
+  "relayer": "0x320797a9938170961852a51b176eC6a410EBfdc8",
+  "contracts": {
+    "numeric": {
+      "address": "0x768167523F3EC90C6DdC7c8e5F90e7901cAcC9b4",
+      "deploymentTx": "0x9a003197f9ac2685e94df88c2f7fbbc472e439e5cb5aa53dc7091a9b140a15ab",
+      "resolutionTx": "0xe0211f2d4bd999bce7c17e74289388a3c6c7296dd34758e24567f4dd0f553522",
+      "exampleOutcome": "NO",
+      "exampleMedianUnits": 6420000,
+      "scale": 100
+    },
+    "structured": {
+      "address": "0x95A182fe4A1aDA7395283b2C41e80A1e6466916B",
+      "deploymentTx": "0x57fa2ed34dea9ba996ec57a349b33a73571d8ac4ed6cc62ef280edc4978b3f2b",
+      "status": "PENDING"
+    },
+    "judgment": {
+      "address": "0xE6E5A7A2d8eC08DfFf70B1A607Fd922a0c5D711c",
+      "deploymentTx": "0x6859f61d77e63e6e4a84703e20a6c713663fcb116f2ec6117194ab7c6367cc24",
+      "status": "PENDING"
+    }
+  }
+}

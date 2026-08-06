@@ -1,0 +1,42 @@
+{
+  "name": "verity-markets",
+  "type": "module",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "preview": "vite preview --host 0.0.0.0",
+    "api": "node server/index.mjs",
+    "worker": "node server/worker.mjs",
+    "resolver:publish": "node server/publish-resolution.mjs",
+    "genlayer:status": "node server/check-v2-deployments.mjs",
+    "genlayer:test": "gltest genlayer/tests -v",
+    "genlayer:syntax": "python3.12 -m py_compile genlayer/contracts/NumericResolver.py genlayer/contracts/StructuredFactResolver.py genlayer/contracts/JudgmentResolver.py genlayer/contracts/PredictionMarket.py",
+    "api:test": "node --test server/test/domain.test.mjs server/test/genlayer-verifier.test.mjs server/test/http-app.test.mjs server/test/postgres-store.test.mjs server/test/solidity-compile.test.mjs",
+    "test": "npm run api:test && npm run genlayer:syntax && npm run genlayer:test && npm run typecheck && npm run build",
+    "genlayer:deploy-markets": "node server/deploy-prediction-markets.mjs",
+    "genlayer:markets": "node server/check-market-deployments.mjs",
+    "genlayer:finalize": "node server/finalize-market-deployments.mjs",
+    "genlayer:live-demo": "node server/deploy-live-demo.mjs"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^4.4.1",
+    "solc": "^0.8.36",
+    "typescript": "^7.0.2",
+    "vite": "^6.1.0"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^1.1.0",
+    "genlayer-js": "^1.1.8",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "viem": "^2.55.10"
+  },
+  "overrides": {
+    "tmp": "0.2.7"
+  }
+}

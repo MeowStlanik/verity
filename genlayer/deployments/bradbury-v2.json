@@ -1,0 +1,50 @@
+{
+  "version": 2,
+  "network": "GenLayer Bradbury Testnet",
+  "chainId": 4221,
+  "checkedAt": "2026-08-05T01:41:23.812Z",
+  "relayer": "0x320797a9938170961852a51b176eC6a410EBfdc8",
+  "remainingBalanceWei": "6989824207800735850",
+  "note": "All three deployments are FINALIZED with FINISHED_WITH_RETURN. These are market-bound smoke deployments, not reusable resolver templates. Resolution was intentionally left PENDING to avoid more polling and transaction spend.",
+  "contracts": {
+    "numeric": {
+      "address": "0xa0bf8Abe38cDa8E1dB92040a3823C4b810Cdd2b7",
+      "deploymentTx": "0x6dbf5cc18024ebdee0ee9753cd17f46c86de91b15b0cef55a6286383acc63022",
+      "status": "FINALIZED",
+      "execution": "FINISHED_WITH_RETURN",
+      "outcome": "PENDING",
+      "binding": {
+        "marketId": "bradbury-v2-numeric-smoke",
+        "observationTime": "2026-08-04T23:55:00.000Z",
+        "resolutionSpecHash": "0x76a53bcd0523bdaa53780946d53012b2eab73485b9bcb9e2e487fd70d55ac8b8",
+        "sourcesHash": "0xb225f3a4295bd362d7a7b7c20072a25bce8473c9b18f532b83c53da535b820f4"
+      }
+    },
+    "structured": {
+      "address": "0x6E5066c43D8F381fAb2a994f5F3433E6872d6fdc",
+      "deploymentTx": "0x9920e98d73c3237a3ecb782dc8e936ff4920c88991c07c488ceff8af8d6e7ea7",
+      "status": "FINALIZED",
+      "execution": "FINISHED_WITH_RETURN",
+      "outcome": "PENDING",
+      "binding": {
+        "marketId": "bradbury-v2-structured-smoke",
+        "observationTime": "2026-08-04T23:55:00.000Z",
+        "resolutionSpecHash": "0x4083a0352f2fff63f5245a35469a8de9927cecb2377d0d57aaf9c22d84fdad76",
+        "sourcesHash": "0x2b83cc2eb3b27e99b32c0102d6109d534f66c214ff99675fb0f2899787b7d070"
+      }
+    },
+    "judgment": {
+      "address": "0xaC520A14258c8af8d6Edf3937280F6B183120E7e",
+      "deploymentTx": "0x680e227881c8cea8313468215e37f4cf30d7acac0a7ec37ff2f4b6b6a19fb5df",
+      "status": "FINALIZED",
+      "execution": "FINISHED_WITH_RETURN",
+      "outcome": "PENDING",
+      "binding": {
+        "marketId": "bradbury-v2-judgment-smoke",
+        "observationTime": "2026-08-05T01:09:43.794Z",
+        "resolutionSpecHash": "0x237d3f00a332758a393ff4982e7e857ca2c2c9f339a6fbf58ecc31aafa9bdb33",
+        "sourcesHash": "0x4bdb6d938964efad1e1a58e283f05f26eeca145d50f8baf4c9ba4f4d97fa19e2"
+      }
+    }
+  }
+}
