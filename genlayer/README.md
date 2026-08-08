@@ -50,15 +50,17 @@ Properties worth knowing:
 - **Effects precede transfers.** GenLayer messages are asynchronous, so positions
   are retired and `collateral` is decremented before `emit_transfer` is called,
   and accounting never reads `self.balance`, which lags emitted transfers.
-- **Payouts are emitted `on: 'finalized'`, and that is not a bug.** A sale, a
-  claim or an LP withdrawal updates the contract's state the moment it is
-  *accepted*, but the GEN itself does not move until the transaction *finalizes* —
-  which on Bradbury is minutes behind, sometimes considerably. So there is a real
-  window where `market_state()` shows the collateral already gone and the wallet
-  balance has not risen yet. Paying on `accepted` instead would close that window
-  and open a much worse one: a round that consensus later rolls back would have
-  moved the money anyway, and the same position could be paid twice. Wait for the
-  balance, and never re-send a payout because the GEN "did not arrive".
+- **Payouts are emitted `on: 'finalized'`, and delivery is not the contract's to
+  guarantee.** A sale, a claim or an LP withdrawal updates state the moment it is
+  *accepted*; the transfer message is emitted with the transaction and applied
+  when it *finalizes*. On the live-demo run the sale reached `FINALIZED` /
+  `FINISHED_WITH_RETURN` carrying its outbound message — `messageType 1`, `value
+  25470119039617052` wei, the quoted payout exactly — and hours later the market
+  still held the full balance and the seller's wallet had not moved. The emit is
+  right and provable from the receipt; applying it is downstream. Emitting
+  `on: 'accepted'` would not fix that and would open a real hole: a round
+  consensus later rolls back would have moved the money anyway, and one position
+  could be paid twice. Never re-send a payout because the GEN "did not arrive".
 
 ### Sources have a shelf life, and the spec has to respect it
 

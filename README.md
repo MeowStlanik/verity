@@ -53,16 +53,24 @@ Coming back out, a quarter of that position was sold
 ([`0xc67ca774…`](https://explorer-bradbury.genlayer.com/tx/0xc67ca77464861d3b74a69b78773d8283c4b5b5cf4cdcc3936301a698b075bdf1)):
 0.04498 shares against a quoted 0.02547 GEN. The shares are retired and the
 collateral is down by exactly that amount — `yesCost` fell from 0.1 to 0.075,
-which is the ceiling-rounded quarter of the basis — **but the GEN itself has not
-landed in the wallet yet, and that is expected.** `_pay` emits its transfer
-`on: 'finalized'`, and every transaction in this run was still `ACCEPTED` an hour
-later; Bradbury's appeal window is what gates it, not the contract. Paying on
-`accepted` instead would move value on a round consensus can still roll back and
-would let one position be paid twice, so the wait is the correct behaviour. If a
-payout looks missing, watch the balance — never re-send.
+which is the ceiling-rounded quarter of the basis. The transaction reached
+`FINALIZED` / `FINISHED_WITH_RETURN`, and **it carries the outbound transfer the
+contract emitted**: one message of `messageType 1` for `value 25470119039617052`
+wei, which is the quoted payout to the wei.
 
-`observedOutWei` in the deployment record is `null` for exactly this reason: the
-script reports what it saw rather than what it expected.
+**That message has not been delivered.** Hours after finality the market's balance
+is still the full 0.6 GEN and the seller's wallet is unchanged. So the contract
+side of the payout path is done and evidenced in the finalized receipt, and what
+has not happened is Bradbury applying the emitted message. This is recorded as
+observed rather than smoothed over: the money-out path is **not** demonstrated
+end to end on this network, and `observedOutWei` in the deployment record is
+`null` because the script reports what it saw rather than what it expected.
+
+`_pay` emits `on: 'finalized'` deliberately and that is not the thing to change.
+Emitting `on: 'accepted'` would move value on a round consensus can still roll
+back and would let one position be paid twice — a solvency hole traded for a
+cosmetic improvement. Whatever is holding the message is downstream of the
+contract. Do not re-send a payout that looks missing.
 
 Redeploy one of these yourself, end to end, with
 `CONFIRM_BRADBURY_DEPLOY=YES npm run genlayer:live-demo`; the full record of this
