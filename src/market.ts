@@ -1,7 +1,7 @@
 import { TransactionHashVariant, TransactionStatus } from 'genlayer-js/types';
-import type { CalldataEncodable, DecodedDeployData, GenLayerTransaction, TransactionHash } from 'genlayer-js/types';
-import { clientFor, readClient, switchToBradbury } from './genlayer';
-import type { Address, Progress } from './genlayer';
+import type { CalldataEncodable, DecodedDeployData, TransactionHash } from 'genlayer-js/types';
+import { awaitFinality, clientFor, readClient, switchToBradbury } from './genlayer';
+import type { Address, Progress, ProgressDetail } from './genlayer';
 import type { Market, Side } from './types';
 import marketCode from '../genlayer/contracts/PredictionMarket.py?raw';
 
@@ -11,18 +11,8 @@ export const ON_CHAIN_CHALLENGE_WINDOW_SECONDS = 600;
 export const ON_CHAIN_MIN_CHALLENGE_STAKE_WEI = 10n ** 17n; // 0.1 GEN
 export const SLIPPAGE_BPS = 100n; // 1%
 const TRADE_DEADLINE_SECONDS = 120;
-/**
- * 20 minutes of polling, which is what Bradbury actually needs.
- *
- * This was 5 minutes on the assumption that finality is normally quicker. It is
- * not: a deployment walks PROPOSING → COMMITTING → APPEAL_COMMITTING → FINALIZED
- * in roughly 15 minutes, so the budget expired on nearly every real deployment
- * and the flow threw *after* the contract had been paid for and deployed. The
- * server-side deploy scripts had already settled on 20 minutes; the browser now
- * matches them rather than being the one client that gives up early.
- */
-const POLL_INTERVAL_MS = 10_000;
-const POLL_RETRIES = 120;
+// Finality waiting lives in `awaitFinality`: one budget and one progress
+// contract for deployments, resolutions and trades alike.
 
 export interface OnChainMarketState {
   marketId: string;
@@ -118,46 +108,12 @@ export function withSlippage(amount: bigint): bigint {
   return amount * (10_000n - SLIPPAGE_BPS) / 10_000n;
 }
 
-/**
- * Poll to finality, saying out loud where the transaction is.
- *
- * `waitForTransactionReceipt` reports nothing until it returns, so a caller that
- * set one status line before it left the UI looking frozen for the fifteen
- * minutes Bradbury takes. Polling here instead costs one extra RPC read per tick
- * and buys a progress line that moves: the consensus stage the transaction is
- * actually in, and how long it has been running.
- */
-async function waitFinalized(client: ReturnType<typeof clientFor>, hash: string, progress: Progress) {
-  const started = Date.now();
-  const elapsed = () => `${Math.round((Date.now() - started) / 1000)}s`;
-  const short = `${hash.slice(0, 10)}…`;
-  progress(`Submitted ${short} · waiting for GenLayer finality (Bradbury normally takes ~15 minutes)…`);
-  let receipt: GenLayerTransaction | undefined;
-  for (let attempt = 0; attempt < POLL_RETRIES; attempt += 1) {
-    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
-    const observed = await client.getTransaction({ hash: hash as TransactionHash }).catch(() => undefined);
-    if (!observed) { progress(`${short} · not indexed yet · ${elapsed()} elapsed`); continue; }
-    if (observed.statusName === TransactionStatus.FINALIZED) { receipt = observed; break; }
-    progress(`${short} · ${observed.statusName || 'PENDING'} · ${elapsed()} elapsed · keep this tab open`);
-  }
-  if (!receipt) {
-    // Bounded polling: report the hash honestly instead of pretending finality.
-    // The contract may well be deployed by now, so say how to recover it rather
-    // than leaving the caller with a transaction they paid for and cannot use.
-    throw new Error(`Transaction ${hash} has not finalized after ${POLL_INTERVAL_MS * POLL_RETRIES / 1000}s. It may still finalize — open it at https://explorer-bradbury.genlayer.com/tx/${hash}, and once it reads FINALIZED use "Bind an existing market contract" on the market page to attach it. Do not deploy a second time.`);
-  }
-  if (receipt.statusName !== TransactionStatus.FINALIZED || (receipt.txExecutionResultName && receipt.txExecutionResultName !== 'FINISHED_WITH_RETURN')) {
-    throw new Error(`Transaction ${hash} failed with ${receipt.statusName || 'unknown'} / ${receipt.txExecutionResultName || 'unknown'}`);
-  }
-  return receipt;
-}
-
 async function send(marketAddress: string, account: string, functionName: string, args: CalldataEncodable[], value: bigint, progress: Progress) {
   const client = clientFor(account);
   await switchToBradbury();
-  progress('Confirm the transaction in MetaMask…');
+  progress('Confirm the transaction in MetaMask…', { stage: 'AWAITING SIGNATURE' });
   const hash = await client.writeContract({ address: marketAddress as Address, functionName, args, value, leaderOnly: false });
-  await waitFinalized(client, String(hash), progress);
+  await awaitFinality(client, String(hash), progress);
   return String(hash);
 }
 
@@ -223,7 +179,7 @@ export async function quoteOnChain(marketAddress: string, side: Side, action: 'b
  *   into a free option to cancel any market. Deploy a second resolver over the
  *   same locked spec and pass it here.
  */
-export async function deployPredictionMarket(market: Market, account: string, disputeResolver: string, progress: Progress = () => undefined) {
+export async function deployPredictionMarket(market: Market, account: string, disputeResolver: string, progress: Progress = () => undefined, step?: ProgressDetail['step']) {
   if (!market.resolverContractAddress) throw new Error('Deploy and bind the resolver before the market contract');
   if (!/^0x[a-fA-F0-9]{40}$/.test(disputeResolver) || disputeResolver === ZERO_ADDRESS) {
     throw new Error('Deploy the dispute resolver before the market contract');
@@ -235,9 +191,9 @@ export async function deployPredictionMarket(market: Market, account: string, di
     throw new Error('The draft is missing its immutable GenLayer binding');
   }
   const client = clientFor(account);
-  progress('Switching MetaMask to GenLayer Bradbury…');
+  progress('Switching MetaMask to GenLayer Bradbury…', { step });
   await switchToBradbury();
-  progress('Confirm the PredictionMarket deployment in MetaMask…');
+  progress('Confirm the PredictionMarket deployment in MetaMask…', { step, stage: 'AWAITING SIGNATURE' });
   const hash = await client.deployContract({
     code: marketCode,
     args: [
@@ -247,11 +203,11 @@ export async function deployPredictionMarket(market: Market, account: string, di
     ],
     leaderOnly: false,
   });
-  const receipt = await waitFinalized(client, String(hash), progress);
+  const receipt = await awaitFinality(client, String(hash), progress, step);
   const decoded = receipt.txDataDecoded as DecodedDeployData | undefined;
   const address = String(decoded?.contractAddress || receipt.data?.contract_address || '');
   if (!/^0x[a-fA-F0-9]{40}$/.test(address)) throw new Error('Finalized deployment did not return a contract address');
-  progress(`Market contract finalized at ${address}.`);
+  progress(`Market contract finalized at ${address}.`, { hash: String(hash), stage: 'FINALIZED', step, done: true });
   return { contractAddress: address, transactionHash: String(hash) };
 }
 

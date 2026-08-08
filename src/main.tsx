@@ -1,7 +1,10 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { api } from './api';
 import type { Market, MarketType, Portfolio, Quote, Side, Source } from './types';
+// Types only: `./genlayer` stays a dynamic import so the wallet bundle is not
+// pulled into the initial page load.
+import type { Progress, ProgressDetail } from './genlayer';
 import { compactMoney, money, short, titleCase, utc } from './format';
 import logo from '../uploads/pasted-1785878984854-0.png';
 import './styles.css';
@@ -201,27 +204,80 @@ function Stat({ label, value, accent = false }: { label: string; value: string; 
   return <div><span>{label}</span><strong className={accent ? 'accent' : ''}>{value}</strong></div>;
 }
 
+const EXPLORER_TX = 'https://explorer-bradbury.genlayer.com/tx';
+/** The budget `awaitFinality` polls to, mirrored here to scale the progress bar. */
+const FINALITY_BUDGET_SECONDS = 20 * 60;
+
+/** Collects both halves of a progress report so a banner can render the detail. */
+function useProgress() {
+  const [state, setState] = useState<{ message: string; detail?: ProgressDetail } | null>(null);
+  const report = useCallback<Progress>((message, detail) => setState({ message, detail }), []);
+  return { state, report, clear: useCallback(() => setState(null), []) };
+}
+
+/**
+ * Show that consensus is running.
+ *
+ * Signing a Bradbury transaction is followed by roughly fifteen minutes in which
+ * the wallet shows nothing and the page has nothing new to say — which reads as
+ * a frozen app, and led to people deploying a second time over a first
+ * deployment that was working fine. So the wait states itself: which of the
+ * three transactions this is, the consensus stage it has reached, a clock that
+ * ticks every second, and a link to watch the same thing on the explorer. The
+ * bar is scaled to the polling budget, so a full bar means the browser is about
+ * to stop waiting — not that the transaction failed.
+ */
+function FinalityBanner({ state }: { state: { message: string; detail?: ProgressDetail } | null }) {
+  const [, tick] = useState(0);
+  const startedAt = state?.detail?.startedAt;
+  const done = state?.detail?.done;
+  useEffect(() => {
+    if (!startedAt || done) return undefined;
+    const id = setInterval(() => tick((value) => value + 1), 1000);
+    return () => clearInterval(id);
+  }, [startedAt, done]);
+  if (!state) return null;
+  const { message, detail } = state;
+  const seconds = startedAt ? Math.round((Date.now() - startedAt) / 1000) : null;
+  const clock = seconds === null ? null : `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+  const percent = seconds === null ? 0 : Math.min(100, (seconds / FINALITY_BUDGET_SECONDS) * 100);
+  return <div className={`finality-banner${done ? ' done' : ''}`} role="status" aria-live="polite">
+    <div className="finality-head">
+      {!done && <span className="finality-spinner" aria-hidden="true" />}
+      {detail?.step && <span className="finality-step">Step {detail.step.index} of {detail.step.total} · {detail.step.label}</span>}
+      {detail?.stage && <span className="finality-stage">{detail.stage}</span>}
+      {clock && <span className="finality-clock">{clock}</span>}
+    </div>
+    <p className="finality-message">{message}</p>
+    {startedAt && !done && <><div className="finality-bar"><span style={{ width: `${percent}%` }} /></div>
+      <p className="finality-note">GenLayer runs a full validator round — on Bradbury this normally takes about 15 minutes per transaction. This is consensus, not a stuck page. Keep the tab open; the deployment continues on chain either way, and it can be bound afterwards if you lose the tab.</p></>}
+    {detail?.hash && <a className="finality-link mono" href={`${EXPLORER_TX}/${detail.hash}`} target="_blank" rel="noreferrer">Watch {detail.hash.slice(0, 18)}… on the explorer →</a>}
+  </div>;
+}
+
 function ResolverBinder({ market, address, onBound, onMessage }: { market: Market; address: string | null; onBound: () => Promise<void>; onMessage: (value: string) => void }) {
-  const [resolver, setResolver] = useState(''); const [busy, setBusy] = useState(false); const [progress, setProgress] = useState('');
+  const [resolver, setResolver] = useState(''); const [busy, setBusy] = useState(false);
+  const { state: progress, report, clear } = useProgress();
   async function deployAndBind() {
     if (!address) return onMessage('Connect the creator wallet first');
     setBusy(true);
     try {
       const { deployMarketResolver } = await import('./genlayer');
-      const deployment = await deployMarketResolver(market, address, setProgress);
+      const deployment = await deployMarketResolver(market, address, report, { index: 1, total: 3, label: 'resolver' });
       const bound = await api.bindResolver(market.id, deployment.contractAddress);
       // A second instance of the same resolver over the same locked spec. The
       // market contract will not deploy without an adjudicator to appeal to.
-      setProgress('Resolver verified. Confirm the dispute resolver deployment in MetaMask…');
-      const adjudicator = await deployMarketResolver(market, address, setProgress);
+      const adjudicator = await deployMarketResolver(market, address, report, { index: 2, total: 3, label: 'dispute resolver' });
       const { deployPredictionMarket } = await import('./market');
-      const deployed = await deployPredictionMarket(bound, address, adjudicator.contractAddress, setProgress);
+      const deployed = await deployPredictionMarket(bound, address, adjudicator.contractAddress, report, { index: 3, total: 3, label: 'PredictionMarket' });
       await api.bindMarketContract(bound.id, deployed.contractAddress, deployed.transactionHash);
-      await onBound(); setProgress('Resolver and market contract verified. Trading is open on Bradbury.'); onMessage('Market is live on GenLayer Bradbury.');
-    } catch (caught) { setProgress(''); onMessage((caught as Error).message); }
+      await onBound();
+      report('Resolver and market contract verified. Trading is open on Bradbury.', { done: true });
+      onMessage('Market is live on GenLayer Bradbury.');
+    } catch (caught) { clear(); onMessage((caught as Error).message); }
     finally { setBusy(false); }
   }
-  return <section className="panel bind-panel"><h2>Deploy market resolver</h2><p>This immutable draft will deploy <b>{market.resolutionSpec.resolver?.contract}</b> twice — once as the resolver, once as the dispute resolver a challenge appeals to — and then its <b>PredictionMarket</b> bound to both. Three MetaMask confirmations are required.</p><button className="button primary" disabled={busy || !address} onClick={deployAndBind}>{busy ? 'Deployment in progress…' : 'Deploy with MetaMask'}</button>{progress && <p className="progress-message" role="status">{progress}</p>}<details><summary>Advanced: bind an existing deployment</summary><pre>{JSON.stringify({ marketBinding: { marketId: market.id, resolutionSpecHash: market.resolutionSpecHash, sourcesHash: market.sourcesHash, observationTime: market.resolutionSpec.observationTime }, resolverConfig: { question: market.title, ...market.resolutionSpec.resolver?.args } }, null, 2)}</pre><form onSubmit={async (event) => {
+  return <section className="panel bind-panel"><h2>Deploy market resolver</h2><p>This immutable draft will deploy <b>{market.resolutionSpec.resolver?.contract}</b> twice — once as the resolver, once as the dispute resolver a challenge appeals to — and then its <b>PredictionMarket</b> bound to both. Three MetaMask confirmations are required, and each one is followed by a full validator round — allow about 45 minutes in total and leave this tab open.</p><button className="button primary" disabled={busy || !address} onClick={deployAndBind}>{busy ? 'Deployment in progress…' : 'Deploy with MetaMask'}</button><FinalityBanner state={progress} /><details><summary>Advanced: bind an existing deployment</summary><pre>{JSON.stringify({ marketBinding: { marketId: market.id, resolutionSpecHash: market.resolutionSpecHash, sourcesHash: market.sourcesHash, observationTime: market.resolutionSpec.observationTime }, resolverConfig: { question: market.title, ...market.resolutionSpec.resolver?.args } }, null, 2)}</pre><form onSubmit={async (event) => {
     event.preventDefault(); if (!address) return onMessage('Connect the creator wallet first');
     try { await api.bindResolver(market.id, resolver); await onBound(); onMessage('Resolver verified and bound. Trading is open.'); }
     catch (caught) { onMessage((caught as Error).message); }
@@ -267,19 +323,21 @@ function MarketContractBinder({ market, onBound, onMessage }: { market: Market; 
 }
 
 function ResolvePanel({ market, address, onDone, onMessage }: { market: Market; address: string | null; onDone: () => Promise<void>; onMessage: (value: string) => void }) {
-  const [busy, setBusy] = useState(false); const [progress, setProgress] = useState('');
+  const [busy, setBusy] = useState(false); const { state: progress, report, clear } = useProgress();
   async function resolve() {
     if (!address) return onMessage('Connect a wallet to pay the GenLayer transaction fee');
     setBusy(true);
     try {
       const { resolveOnGenLayer } = await import('./genlayer');
-      const proof = await resolveOnGenLayer(market, address, setProgress);
+      const proof = await resolveOnGenLayer(market, address, report);
       await api.publishResolution(market.id, proof);
-      await onDone(); setProgress('Verified preliminary result published. Challenge window is open.'); onMessage('GenLayer result verified by the API.');
-    } catch (caught) { setProgress(''); onMessage((caught as Error).message); }
+      await onDone();
+      report('Verified preliminary result published. Challenge window is open.', { done: true });
+      onMessage('GenLayer result verified by the API.');
+    } catch (caught) { clear(); onMessage((caught as Error).message); }
     finally { setBusy(false); }
   }
-  return <section className="panel resolve-panel"><h2>Resolve with GenLayer</h2><p>The observation time has passed. Validators will independently read the three locked sources and reach consensus; the API accepts only the finalized transaction proof.</p><button className="button primary" disabled={busy || !address} onClick={resolve}>{busy ? 'Resolution in progress…' : 'Resolve on Bradbury'}</button>{progress && <p className="progress-message" role="status">{progress}</p>}</section>;
+  return <section className="panel resolve-panel"><h2>Resolve with GenLayer</h2><p>The observation time has passed. Validators will independently read the three locked sources and reach consensus; the API accepts only the finalized transaction proof.</p><button className="button primary" disabled={busy || !address} onClick={resolve}>{busy ? 'Resolution in progress…' : 'Resolve on Bradbury'}</button><FinalityBanner state={progress} /></section>;
 }
 
 function ChallengePanel({ market, address, onDone, onMessage }: { market: Market; address: string | null; onDone: () => Promise<void>; onMessage: (value: string) => void }) {
@@ -391,6 +449,7 @@ const emptySource = (): Source => ({ name: '', url: '', jsonPath: '', timestampP
 function CreateMarket({ address }: { address: string | null }) {
   const [type, setType] = useState<MarketType>('deterministic'); const [sources, setSources] = useState<Source[]>([emptySource(), emptySource(), emptySource()]); const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false); const [draftId, setDraftId] = useState('');
+  const { state: progress, report, clear } = useProgress();
   const [values, setValues] = useState({ title: '', category: 'Other', closesAt: '', liquidity: '10', summary: '', criterion: '' });
   const update = (index: number, key: keyof Source, value: string) => setSources((current) => current.map((source, sourceIndex) => sourceIndex === index ? { ...source, [key]: value } : source));
   const setValue = (key: keyof typeof values, value: string) => setValues((current) => ({ ...current, [key]: value }));
@@ -417,19 +476,17 @@ function CreateMarket({ address }: { address: string | null }) {
       const result = await api.create({ marketId: crypto.randomUUID().replaceAll('-', ''), title: form.get('title'), category: form.get('category'), type, closesAt, initialLiquidity: Number(form.get('liquidity')), resolverNetwork: 'testnetBradbury', resolutionSpec: { summary: form.get('summary'), criteria: [form.get('criterion')], tieBreak: 'VOID', unavailableRule: 'VOID unless all three locked sources agree under the rule' }, sources, numeric: type === 'deterministic' ? { comparator: form.get('comparator'), scale: Number(form.get('scale')), thresholdUnits: Number(form.get('threshold')), maxSourceSpreadUnits: Number(form.get('spread')) } : undefined, criterion: type === 'structured' ? form.get('criterion') : undefined, interpretationRule: type === 'judgment' ? form.get('criterion') : undefined });
       setDraftId(result.market.id); setMessage('Draft and hashes locked. Confirm the resolver deployment in MetaMask…');
       const { deployMarketResolver } = await import('./genlayer');
-      const deployment = await deployMarketResolver(result.market, address, setMessage);
+      const deployment = await deployMarketResolver(result.market, address, report, { index: 1, total: 3, label: 'resolver' });
       const bound = await api.bindResolver(result.market.id, deployment.contractAddress);
       // The adjudicator: the same resolver over the same locked spec, deployed a
       // second time so a challenge has a fresh consensus round to appeal to. The
       // market contract refuses to deploy without one.
-      setMessage('Resolver verified. Confirm the dispute resolver deployment in MetaMask…');
-      const adjudicator = await deployMarketResolver(result.market, address, setMessage);
-      setMessage('Dispute resolver deployed. Confirm the PredictionMarket deployment in MetaMask…');
+      const adjudicator = await deployMarketResolver(result.market, address, report, { index: 2, total: 3, label: 'dispute resolver' });
       const { deployPredictionMarket } = await import('./market');
-      const deployed = await deployPredictionMarket(bound, address, adjudicator.contractAddress, setMessage);
+      const deployed = await deployPredictionMarket(bound, address, adjudicator.contractAddress, report, { index: 3, total: 3, label: 'PredictionMarket' });
       await api.bindMarketContract(bound.id, deployed.contractAddress, deployed.transactionHash);
       go(`/markets/${bound.id}`);
-    } catch (caught) { setMessage((caught as Error).message); }
+    } catch (caught) { clear(); setMessage((caught as Error).message); }
     finally { setBusy(false); }
   }
   return <section className="create-page"><div className="page-heading"><div><h1>Create a market</h1><p>Lock the immutable spec, then deploy its resolver and its GEN-custody PredictionMarket to Bradbury in one flow.</p></div><button className="button demo-button" type="button" onClick={loadDemoTemplate}>Load evaluation demo</button></div><form className="create-form" onSubmit={submit}>
@@ -437,7 +494,7 @@ function CreateMarket({ address }: { address: string | null }) {
     <div className="form-section"><div className="section-number">02</div><div><h2>Market class</h2><div className="type-selector">{(['deterministic', 'structured', 'judgment'] as MarketType[]).map((value, index) => <button type="button" className={type === value ? 'selected' : ''} key={value} onClick={() => setType(value)}><b>Level {index + 1}</b><strong>{marketTypeLabel[value]}</strong><span>{value === 'deterministic' ? 'Numeric feeds and thresholds' : value === 'structured' ? 'Discrete, verifiable web facts' : 'Text interpreted against a rule'}</span></button>)}</div></div></div>
     <div className="form-section"><div className="section-number">03</div><div><h2>Resolution constitution</h2><label>Resolution summary<textarea name="summary" value={values.summary} onChange={(event) => setValue('summary', event.target.value)} placeholder="Resolves YES if…" required /></label><label>{type === 'judgment' ? 'Locked interpretation rule' : 'Locked criterion'}<textarea name="criterion" value={values.criterion} onChange={(event) => setValue('criterion', event.target.value)} required /></label>{type === 'deterministic' && <fieldset><legend>Numeric rule</legend><div className="form-grid"><label>Comparator<select name="comparator"><option>GTE</option><option>GT</option><option>LTE</option><option>LT</option></select></label><label>Scale<input name="scale" type="number" min="1" defaultValue="100" required /></label><label>Threshold units<input name="threshold" type="number" step="1" required /></label><label>Maximum source spread units<input name="spread" type="number" min="0" step="1" defaultValue="100" required /></label></div></fieldset>}</div></div>
     <div className="form-section"><div className="section-number">04</div><div><h2>Exactly three fixed sources</h2><p>Sources are hashed and cannot be replaced after creation.</p><div className="sources-grid">{sources.map((source, index) => <fieldset className="source-card" key={index}><legend>Source {index + 1}</legend><label>Name<input value={source.name} onChange={(event) => update(index, 'name', event.target.value)} required /></label><label>URL<input type="url" value={source.url} onChange={(event) => update(index, 'url', event.target.value)} required /></label>{type === 'deterministic' && <><label>Value JSON path<input value={source.jsonPath || ''} onChange={(event) => update(index, 'jsonPath', event.target.value)} required /></label><label>Timestamp JSON path<input value={source.timestampPath || ''} onChange={(event) => update(index, 'timestampPath', event.target.value)} required /></label><label>Locked timestamp value<input value={source.timestampValue || ''} onChange={(event) => update(index, 'timestampValue', event.target.value)} required /></label></>}</fieldset>)}</div></div></div>
-    <div className="create-submit"><p>{address ? `Creator ${short(address)} · Bradbury gas paid in GEN` : 'Connect the creator wallet before submitting.'}</p><button className="button primary" type="submit" disabled={busy}>{busy ? 'Creating and deploying…' : 'Create + deploy resolver'}</button></div>{message && <div className="creation-status" role="status">{message}{draftId && <><br /><Link to={`/markets/${draftId}`}>Open recoverable draft →</Link></>}</div>}
+    <div className="create-submit"><p>{address ? `Creator ${short(address)} · Bradbury gas paid in GEN` : 'Connect the creator wallet before submitting.'}</p><button className="button primary" type="submit" disabled={busy}>{busy ? 'Creating and deploying…' : 'Create + deploy resolver'}</button></div><FinalityBanner state={progress} />{message && <div className="creation-status" role="status">{message}{draftId && <><br /><Link to={`/markets/${draftId}`}>Open recoverable draft →</Link></>}</div>}
   </form></section>;
 }
 

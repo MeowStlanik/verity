@@ -319,3 +319,20 @@ legend { padding: 0 7px; color: var(--quiet); font-size: 10.5px; font-weight: 70
 .ledger-label.onchain { color: var(--brand); }
 .trade-panel .contract-address { margin: 0 0 12px; color: var(--quiet); font-size: 10px; text-align: center; overflow-wrap: anywhere; }
 .trade-panel .button.wide + .button.wide { margin-top: 8px; }
+
+/* Finality banner — the fifteen minutes of consensus after a signature, made visible. */
+.finality-banner { margin-top: 14px; padding: 13px 14px; border: 1px solid var(--brand); border-radius: 11px; background: color-mix(in oklch, var(--brand) 9%, var(--surface-2)); }
+.finality-banner.done { border-color: var(--yes); background: color-mix(in oklch, var(--yes) 9%, var(--surface-2)); }
+.finality-head { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; }
+.finality-spinner { width: 13px; height: 13px; flex: none; border: 2px solid color-mix(in oklch, var(--brand) 35%, transparent); border-top-color: var(--brand); border-radius: 50%; animation: finality-spin .9s linear infinite; }
+@keyframes finality-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .finality-spinner { animation-duration: 3s; } }
+.finality-step { color: var(--text); font-size: 12px; font-weight: 700; }
+.finality-stage { padding: 2px 8px; border-radius: 999px; background: var(--surface-3); color: var(--muted); font: 10px 'JetBrains Mono', monospace; letter-spacing: .04em; }
+.finality-clock { margin-left: auto; color: var(--text); font: 13px 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums; }
+.finality-message { margin: 9px 0 0; color: var(--text); font-size: 12.5px; line-height: 1.45; }
+.finality-bar { height: 4px; margin-top: 10px; border-radius: 999px; background: var(--surface-3); overflow: hidden; }
+.finality-bar span { display: block; height: 100%; background: var(--brand); border-radius: 999px; transition: width 1s linear; }
+.finality-note { margin: 9px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.finality-link { display: inline-block; margin-top: 9px; color: var(--brand); font-size: 11px; text-decoration: none; }
+.finality-link:hover { text-decoration: underline; }

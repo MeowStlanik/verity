@@ -7,8 +7,70 @@ import numericCode from '../genlayer/contracts/NumericResolver.py?raw';
 import structuredCode from '../genlayer/contracts/StructuredFactResolver.py?raw';
 import judgmentCode from '../genlayer/contracts/JudgmentResolver.py?raw';
 
-export type Progress = (message: string) => void;
+/**
+ * The machine-readable half of a progress report.
+ *
+ * A signed transaction on Bradbury is followed by roughly fifteen minutes of
+ * consensus during which nothing in the wallet moves. A sentence alone cannot
+ * carry that: the UI needs the stage to name it, the hash to link to it, and a
+ * start time to run its own clock against, so the wait looks like a wait rather
+ * than a hang. Every field is optional — callers that only have a sentence keep
+ * passing one.
+ */
+export interface ProgressDetail {
+  /** The transaction being awaited, if the flow has reached one. */
+  hash?: string;
+  /** Consensus stage as the chain last reported it: PROPOSING, COMMITTING, … */
+  stage?: string;
+  /** Epoch ms the wait began, so a component can tick a timer per second. */
+  startedAt?: number;
+  /** Position in a multi-transaction flow, for "step 2 of 3". */
+  step?: { index: number; total: number; label: string };
+  /** Set once the wait ends, so a banner can stop claiming to be busy. */
+  done?: boolean;
+}
+export type Progress = (message: string, detail?: ProgressDetail) => void;
 export type Address = `0x${string}`;
+
+/** 20 minutes, which is what Bradbury needs; the deploy scripts use the same. */
+export const FINALITY_POLL_MS = 10_000;
+export const FINALITY_RETRIES = 120;
+export const EXPLORER = 'https://explorer-bradbury.genlayer.com';
+
+/**
+ * Poll a transaction to finality, reporting where it is on every tick.
+ *
+ * `waitForTransactionReceipt` is silent until it returns, so the three flows
+ * that used it each went quiet for the whole fifteen minutes right after the
+ * user signed — the point at which they most need to be told something is
+ * happening. This costs one extra read per tick and buys that.
+ */
+export async function awaitFinality(
+  client: ReturnType<typeof clientFor>,
+  hash: string,
+  progress: Progress,
+  step?: ProgressDetail['step'],
+): Promise<GenLayerTransaction> {
+  const startedAt = Date.now();
+  const base = { hash, startedAt, step };
+  progress('Submitted to Bradbury. Waiting for validator consensus…', { ...base, stage: 'SUBMITTED' });
+  for (let attempt = 0; attempt < FINALITY_RETRIES; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, FINALITY_POLL_MS));
+    const observed = await client.getTransaction({ hash: hash as TransactionHash }).catch(() => undefined);
+    if (!observed) { progress('Waiting for Bradbury to index the transaction…', { ...base, stage: 'NOT INDEXED' }); continue; }
+    const stage = String(observed.statusName || 'PENDING');
+    if (observed.statusName === TransactionStatus.FINALIZED) {
+      if (observed.txExecutionResultName && observed.txExecutionResultName !== 'FINISHED_WITH_RETURN') {
+        throw new Error(`Transaction ${hash} finalized as ${observed.txExecutionResultName}. See ${EXPLORER}/tx/${hash}`);
+      }
+      progress('Finalized.', { ...base, stage: 'FINALIZED', done: true });
+      return observed;
+    }
+    progress('Consensus in progress. Keep this tab open.', { ...base, stage });
+  }
+  // Bounded polling: report the hash honestly instead of pretending finality.
+  throw new Error(`Transaction ${hash} has not finalized after ${FINALITY_POLL_MS * FINALITY_RETRIES / 60_000} minutes. It may still finalize — watch ${EXPLORER}/tx/${hash}, and once it reads FINALIZED bind it from the market page instead of deploying again.`);
+}
 
 export function clientFor(address: string) {
   if (!window.ethereum) throw new Error('Install MetaMask or another EIP-1193 wallet');
@@ -98,20 +160,16 @@ function contractAddress(receipt: GenLayerTransaction): Address {
   return address as Address;
 }
 
-export async function deployMarketResolver(market: Market, address: string, progress: Progress = () => undefined) {
+export async function deployMarketResolver(market: Market, address: string, progress: Progress = () => undefined, step?: ProgressDetail['step']) {
   const client = clientFor(address);
-  progress('Switching MetaMask to GenLayer Bradbury…');
+  progress('Switching MetaMask to GenLayer Bradbury…', { step });
   await switchToBradbury();
   const payload = deployPayload(market, address);
-  progress('Confirm the resolver deployment in MetaMask…');
+  progress('Confirm the resolver deployment in MetaMask…', { step, stage: 'AWAITING SIGNATURE' });
   const hash = await client.deployContract({ code: payload.code, args: payload.args, leaderOnly: false });
-  progress(`Deployment submitted (${hash.slice(0, 10)}…). Waiting for GenLayer finality…`);
-  const receipt = await client.waitForTransactionReceipt({ hash: hash as TransactionHash, status: TransactionStatus.FINALIZED, interval: 5_000, retries: 240 });
-  if (receipt.statusName !== TransactionStatus.FINALIZED || (receipt.txExecutionResultName && receipt.txExecutionResultName !== 'FINISHED_WITH_RETURN')) {
-    throw new Error(`Resolver deployment failed with ${receipt.statusName || 'unknown'} / ${receipt.txExecutionResultName || 'unknown'}`);
-  }
+  const receipt = await awaitFinality(client, String(hash), progress, step);
   const resolverAddress = contractAddress(receipt);
-  progress(`Resolver finalized at ${resolverAddress}. Verifying immutable binding…`);
+  progress(`Resolver finalized at ${resolverAddress}. Verifying immutable binding…`, { hash: String(hash), stage: 'FINALIZED', step, done: true });
   return { contractAddress: resolverAddress, transactionHash: hash };
 }
 
@@ -120,7 +178,7 @@ export async function resolveOnGenLayer(market: Market, address: string, progres
   const client = clientFor(address);
   progress('Switching MetaMask to GenLayer Bradbury…');
   await switchToBradbury();
-  progress('Confirm resolve() in MetaMask…');
+  progress('Confirm resolve() in MetaMask…', { stage: 'AWAITING SIGNATURE' });
   const hash = await client.writeContract({
     address: market.resolverContractAddress as Address,
     functionName: 'resolve',
@@ -128,11 +186,7 @@ export async function resolveOnGenLayer(market: Market, address: string, progres
     value: 0n,
     leaderOnly: false,
   });
-  progress(`Validators are reading the locked sources (${String(hash).slice(0, 10)}…). Waiting for finality…`);
-  const receipt = await client.waitForTransactionReceipt({ hash, status: TransactionStatus.FINALIZED, interval: 5_000, retries: 240 });
-  if (receipt.statusName !== TransactionStatus.FINALIZED || (receipt.txExecutionResultName && receipt.txExecutionResultName !== 'FINISHED_WITH_RETURN')) {
-    throw new Error(`Resolution failed with ${receipt.statusName || 'unknown'} / ${receipt.txExecutionResultName || 'unknown'}`);
-  }
-  progress('Resolution finalized. API is verifying the transaction and contract state…');
+  await awaitFinality(client, String(hash), progress);
+  progress('Resolution finalized. API is verifying the transaction and contract state…', { hash: String(hash), stage: 'FINALIZED', done: true });
   return { contractAddress: market.resolverContractAddress, transactionHash: String(hash) };
 }

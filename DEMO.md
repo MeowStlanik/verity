@@ -88,9 +88,12 @@ CONFIRM_BRADBURY_DEPLOY=YES MARKET_MINUTE=<minute> RESOLVER_TX=0x<hash> \
 
    **Budget about 45 minutes and leave the tab open.** Each of the three
    deployments walks PROPOSING → COMMITTING → APPEAL_COMMITTING → FINALIZED, which
-   on Bradbury takes roughly fifteen minutes apiece. The status line under the
-   button shows the stage and the elapsed seconds, so a long wait is visibly a
-   wait rather than a hang.
+   on Bradbury takes roughly fifteen minutes apiece. Nothing moves in the wallet
+   during that, so the page says it instead: a banner under the button names the
+   step (1, 2 or 3 of 3), the consensus stage as the chain reports it, a clock
+   that ticks every second, a bar scaled to the 20-minute polling budget, and a
+   link to the same transaction on the explorer. A full bar means the browser is
+   about to stop waiting, not that the transaction failed.
 
    If the browser stops waiting anyway — a timeout, a reload, a closed tab — the
    contract is still deployed and paid for; what is missing is only the record of
