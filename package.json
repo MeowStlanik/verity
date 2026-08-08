@@ -14,7 +14,7 @@
     "genlayer:status": "node server/check-v2-deployments.mjs",
     "genlayer:test": "gltest genlayer/tests -v",
     "genlayer:syntax": "python3.12 -m py_compile genlayer/contracts/NumericResolver.py genlayer/contracts/StructuredFactResolver.py genlayer/contracts/JudgmentResolver.py genlayer/contracts/PredictionMarket.py",
-    "api:test": "node --test server/test/domain.test.mjs server/test/genlayer-verifier.test.mjs server/test/http-app.test.mjs server/test/postgres-store.test.mjs server/test/solidity-compile.test.mjs",
+    "api:test": "node --test server/test/domain.test.mjs server/test/genlayer-verifier.test.mjs server/test/http-app.test.mjs server/test/postgres-store.test.mjs server/test/solidity-compile.test.mjs server/test/vercel-handler.test.mjs",
     "test": "npm run api:test && npm run genlayer:syntax && npm run genlayer:test && npm run typecheck && npm run build",
     "genlayer:deploy-markets": "node server/deploy-prediction-markets.mjs",
     "genlayer:markets": "node server/check-market-deployments.mjs",

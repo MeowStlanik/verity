@@ -51,6 +51,10 @@ export async function createApi({
   authSecret = process.env.AUTH_SECRET || 'development-only-change-me',
   resolverKey = process.env.RESOLVER_API_KEY || 'development-resolver-key',
   corsOrigin = process.env.CORS_ORIGIN || '',
+  // What `/health` should call the backing store. The caller knows; this module
+  // can only guess from the environment, and it guessed 'json' for a serverless
+  // deployment whose writes do not outlive the instance.
+  storage = process.env.DATABASE_URL || process.env.POSTGRES_URL ? 'postgres' : 'json',
 } = {}) {
   if (!store) throw new Error('A market store is required');
   await nonceStore.init();
@@ -91,7 +95,7 @@ export async function createApi({
     const path = req.verityPath || url.pathname;
     const query = Object.fromEntries(url.searchParams);
     delete query.route;
-    if (req.method === 'GET' && path === '/health') return json(res, 200, { ok: true, service: 'verity-markets-api', storage: process.env.DATABASE_URL || process.env.POSTGRES_URL ? 'postgres' : 'json' });
+    if (req.method === 'GET' && path === '/health') return json(res, 200, { ok: true, service: 'verity-markets-api', storage, durable: storage !== 'ephemeral' });
     if (req.method === 'POST' && path === '/v1/auth/nonce') {
       const { address } = await parseBody(req);
       if (!isAddress(address || '')) throw new ApiError('INVALID_ADDRESS', 'A valid wallet address is required');

@@ -121,14 +121,34 @@ stores the ledger and wallet login nonces in Neon Postgres with compare-and-swap
 revisions, so concurrent trades cannot overwrite each other.
 
 1. Import the repository in Vercel and deploy once.
-2. **Storage → Create Database → Neon Postgres**, free plan, connected to the same
+2. **Settings → Deployment Protection → Vercel Authentication: Disabled**, then
+   redeploy. Vercel turns this on for new projects, and it is why a reviewer who
+   is not on the team sees *"This Vercel deployment is protected. A team owner
+   needs to approve your request"* instead of the app. Share the **production**
+   domain, never a preview URL: preview deployments stay protected under
+   *Standard Protection* even after the production one is opened up.
+3. **Storage → Create Database → Neon Postgres**, free plan, connected to the same
    project. This injects `DATABASE_URL`.
-3. **Settings → Environment Variables**: `AUTH_SECRET` (`openssl rand -hex 32`),
+4. **Settings → Environment Variables**: `AUTH_SECRET` (`openssl rand -hex 32`),
    optionally `CHALLENGE_WINDOW_SECONDS=120` and `RESOLVER_API_KEY`.
-4. Redeploy. `/health` should report `"storage":"postgres"`.
+5. Redeploy. `/health` should report `"storage":"postgres"` and `"durable":true`.
 
 Do not set `VITE_API_BASE`: requests stay on the Vercel origin. No Railway, Render,
 separate backend, migration command or persistent worker is involved.
+
+**Without a database it still runs, and says so.** If `DATABASE_URL` is absent the
+function serves the seed from a per-instance file in `/tmp` rather than refusing to
+boot, because the market list is public metadata and the on-chain markets keep
+their GEN, shares, quotes and outcome on Bradbury — the client reads those from the
+contract, and the API refuses their value-moving calls in any case. What is lost is
+durability: Vercel gives each function instance its own `/tmp` and recycles it, so
+a simulation trade may be invisible to the very next request. `/health` reports
+`"storage":"ephemeral"`, `"durable":false`, every response carries
+`X-Verity-Storage: ephemeral`, and the build log carries the warning. Step 3 is how
+you get out of that mode; the point of the fallback is that a missing integration
+costs you the ledger, not the whole site. `AUTH_SECRET` is treated the same way —
+if it is unset, sessions are signed with a per-instance random secret rather than
+the published development default, so sign-ins work but do not survive a recycle.
 
 Bradbury needs test GEN for gas and for liquidity. RPC `https://rpc-bradbury.genlayer.com`,
 chain ID `4221`, currency `GEN`, explorer `https://explorer-bradbury.genlayer.com`.

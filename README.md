@@ -134,7 +134,13 @@ npm run dev      # terminal 2 — http://localhost:5173
 
 Local development uses an atomic JSON store. A Vercel deployment uses the included
 Vercel Function and Neon Postgres adapter; no separate API host and no
-`VITE_API_BASE` are needed. Setup steps are in [DEMO.md](DEMO.md).
+`VITE_API_BASE` are needed. Setup steps are in [DEMO.md](DEMO.md), including the
+two settings a public reviewer will notice first: **Deployment Protection must be
+disabled** or they see Vercel's approval wall instead of the app, and the Neon
+integration supplies `DATABASE_URL`. Without that integration the API no longer
+refuses to boot — it serves the seed from an ephemeral `/tmp` store and reports
+`"storage":"ephemeral"` at `/health`, so the site and the on-chain markets stay
+readable while only the ledger loses durability.
 
 ## Security model
 
@@ -187,7 +193,7 @@ npm test                 # API + resolver/market gltest + typecheck + production
 npm audit --omit=dev
 ```
 
-43 API tests and 52 GenVM tests. The GenVM suite covers payable liquidity, buys on
+45 API tests and 52 GenVM tests. The GenVM suite covers payable liquidity, buys on
 both sides, price movement, slippage rejection, expired deadlines, sells, trading
 after close, resolver binding, preliminary YES/NO/VOID, the VOID challenge window,
 challenge stakes, prevention of preliminary overwrite, uncontested finalization,
