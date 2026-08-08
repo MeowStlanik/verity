@@ -11,10 +11,18 @@ export const ON_CHAIN_CHALLENGE_WINDOW_SECONDS = 600;
 export const ON_CHAIN_MIN_CHALLENGE_STAKE_WEI = 10n ** 17n; // 0.1 GEN
 export const SLIPPAGE_BPS = 100n; // 1%
 const TRADE_DEADLINE_SECONDS = 120;
-/** ~5 minutes of polling. Bradbury finality is normally far quicker; when it is
- *  not, the caller gets the transaction hash back rather than an endless wait. */
-const POLL_INTERVAL_MS = 5_000;
-const POLL_RETRIES = 60;
+/**
+ * 20 minutes of polling, which is what Bradbury actually needs.
+ *
+ * This was 5 minutes on the assumption that finality is normally quicker. It is
+ * not: a deployment walks PROPOSING → COMMITTING → APPEAL_COMMITTING → FINALIZED
+ * in roughly 15 minutes, so the budget expired on nearly every real deployment
+ * and the flow threw *after* the contract had been paid for and deployed. The
+ * server-side deploy scripts had already settled on 20 minutes; the browser now
+ * matches them rather than being the one client that gives up early.
+ */
+const POLL_INTERVAL_MS = 10_000;
+const POLL_RETRIES = 120;
 
 export interface OnChainMarketState {
   marketId: string;
@@ -110,17 +118,33 @@ export function withSlippage(amount: bigint): bigint {
   return amount * (10_000n - SLIPPAGE_BPS) / 10_000n;
 }
 
+/**
+ * Poll to finality, saying out loud where the transaction is.
+ *
+ * `waitForTransactionReceipt` reports nothing until it returns, so a caller that
+ * set one status line before it left the UI looking frozen for the fifteen
+ * minutes Bradbury takes. Polling here instead costs one extra RPC read per tick
+ * and buys a progress line that moves: the consensus stage the transaction is
+ * actually in, and how long it has been running.
+ */
 async function waitFinalized(client: ReturnType<typeof clientFor>, hash: string, progress: Progress) {
-  progress(`Submitted ${hash.slice(0, 10)}… Waiting for GenLayer finality…`);
-  let receipt: GenLayerTransaction;
-  try {
-    receipt = await client.waitForTransactionReceipt({
-      hash: hash as TransactionHash, status: TransactionStatus.FINALIZED,
-      interval: POLL_INTERVAL_MS, retries: POLL_RETRIES,
-    });
-  } catch {
+  const started = Date.now();
+  const elapsed = () => `${Math.round((Date.now() - started) / 1000)}s`;
+  const short = `${hash.slice(0, 10)}…`;
+  progress(`Submitted ${short} · waiting for GenLayer finality (Bradbury normally takes ~15 minutes)…`);
+  let receipt: GenLayerTransaction | undefined;
+  for (let attempt = 0; attempt < POLL_RETRIES; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    const observed = await client.getTransaction({ hash: hash as TransactionHash }).catch(() => undefined);
+    if (!observed) { progress(`${short} · not indexed yet · ${elapsed()} elapsed`); continue; }
+    if (observed.statusName === TransactionStatus.FINALIZED) { receipt = observed; break; }
+    progress(`${short} · ${observed.statusName || 'PENDING'} · ${elapsed()} elapsed · keep this tab open`);
+  }
+  if (!receipt) {
     // Bounded polling: report the hash honestly instead of pretending finality.
-    throw new Error(`Transaction ${hash} is still PROPOSING/PENDING after ${POLL_INTERVAL_MS * POLL_RETRIES / 1000}s. It may still finalize — check the explorer.`);
+    // The contract may well be deployed by now, so say how to recover it rather
+    // than leaving the caller with a transaction they paid for and cannot use.
+    throw new Error(`Transaction ${hash} has not finalized after ${POLL_INTERVAL_MS * POLL_RETRIES / 1000}s. It may still finalize — open it at https://explorer-bradbury.genlayer.com/tx/${hash}, and once it reads FINALIZED use "Bind an existing market contract" on the market page to attach it. Do not deploy a second time.`);
   }
   if (receipt.statusName !== TransactionStatus.FINALIZED || (receipt.txExecutionResultName && receipt.txExecutionResultName !== 'FINISHED_WITH_RETURN')) {
     throw new Error(`Transaction ${hash} failed with ${receipt.statusName || 'unknown'} / ${receipt.txExecutionResultName || 'unknown'}`);
@@ -229,6 +253,29 @@ export async function deployPredictionMarket(market: Market, account: string, di
   if (!/^0x[a-fA-F0-9]{40}$/.test(address)) throw new Error('Finalized deployment did not return a contract address');
   progress(`Market contract finalized at ${address}.`);
   return { contractAddress: address, transactionHash: String(hash) };
+}
+
+/**
+ * Recover the contract address from a deployment transaction.
+ *
+ * A deployment that finalizes after the browser stopped waiting leaves a paid-for
+ * PredictionMarket that nothing points at, and the market silently stays a
+ * simulation — trades route to the API ledger and the creator sees a fill that
+ * moved no GEN. This reads the deployment back so it can be bound afterwards; it
+ * needs no wallet, and the API verifies the address against the market's binding
+ * before accepting it, so a wrong hash is rejected rather than believed.
+ */
+export async function marketContractFromDeployment(transactionHash: string) {
+  if (!/^0x[a-fA-F0-9]{64}$/.test(transactionHash)) throw new Error('Enter the 0x… deployment transaction hash');
+  const observed = await readClient().getTransaction({ hash: transactionHash as TransactionHash });
+  if (!observed) throw new Error(`Bradbury does not know transaction ${transactionHash}`);
+  if (observed.statusName !== TransactionStatus.FINALIZED) {
+    throw new Error(`That deployment reads ${observed.statusName || 'PENDING'}, not FINALIZED. Wait for finality and try again.`);
+  }
+  const decoded = observed.txDataDecoded as DecodedDeployData | undefined;
+  const address = String(decoded?.contractAddress || observed.data?.contract_address || '');
+  if (!/^0x[a-fA-F0-9]{40}$/.test(address)) throw new Error('That transaction is not a contract deployment');
+  return { contractAddress: address, transactionHash };
 }
 
 // ------------------------------------------------------------------- writing

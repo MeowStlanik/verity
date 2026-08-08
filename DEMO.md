@@ -85,6 +85,22 @@ CONFIRM_BRADBURY_DEPLOY=YES MARKET_MINUTE=<minute> RESOLVER_TX=0x<hash> \
    resolver, the dispute resolver a challenge will appeal to, then the
    `PredictionMarket` bound to both. The API verifies the resolver and the market
    against the locked draft before it will record either address.
+
+   **Budget about 45 minutes and leave the tab open.** Each of the three
+   deployments walks PROPOSING → COMMITTING → APPEAL_COMMITTING → FINALIZED, which
+   on Bradbury takes roughly fifteen minutes apiece. The status line under the
+   button shows the stage and the elapsed seconds, so a long wait is visibly a
+   wait rather than a hang.
+
+   If the browser stops waiting anyway — a timeout, a reload, a closed tab — the
+   contract is still deployed and paid for; what is missing is only the record of
+   its address. The market then keeps trading as a **SIMULATION**, and this is the
+   one failure a creator cannot see from the trade itself: the fill message reads
+   the same whether the GEN moved or not. Check **Settlement → Market contract**;
+   if it says *Not deployed*, take the deployment hash from MetaMask or the
+   explorer and use **Bind an existing market contract** on the market page. Do
+   not deploy a second time — that spends GEN on a rival contract holding the same
+   market's collateral.
 4. On the market page, **Provide liquidity** first — a market with no liquidity
    cannot be traded. Then buy YES or NO. The quote comes from `quote_buy()` on the
    contract, so the number shown is the number filled; a 1% slippage floor and a

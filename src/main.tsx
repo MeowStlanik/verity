@@ -228,6 +228,44 @@ function ResolverBinder({ market, address, onBound, onMessage }: { market: Marke
   }}><label>Finalized resolver address<input value={resolver} onChange={(event) => setResolver(event.target.value)} pattern="0x[a-fA-F0-9]{40}" required /></label><button className="button secondary">Verify and bind</button></form></details></section>;
 }
 
+/**
+ * Attach a PredictionMarket that was deployed but never bound.
+ *
+ * Bradbury takes about fifteen minutes to finalize a deployment. Whenever the
+ * browser stopped waiting first — a timeout, a closed tab, a reload — the
+ * contract existed and was paid for, but nothing recorded it, so the market
+ * stayed a simulation and its trades quietly went to the API ledger instead of
+ * to chain. That is the one failure here a creator cannot see: the fill message
+ * looks identical. This panel exists so the answer is "bind it", never "deploy
+ * it again" — a second deployment spends GEN to create a rival contract holding
+ * the same market's collateral.
+ */
+function MarketContractBinder({ market, onBound, onMessage }: { market: Market; onBound: () => Promise<void>; onMessage: (value: string) => void }) {
+  const [value, setValue] = useState(''); const [busy, setBusy] = useState(false); const [progress, setProgress] = useState('');
+  async function bind(event: React.FormEvent) {
+    event.preventDefault(); setBusy(true);
+    try {
+      const entered = value.trim();
+      const { marketContractFromDeployment } = await import('./market');
+      // Either identifier works: a hash is looked up on chain, an address is
+      // taken as given. The API re-verifies the contract against this market's
+      // locked binding either way, so a wrong one is refused rather than trusted.
+      let contractAddress = entered, transactionHash = '';
+      if (/^0x[a-fA-F0-9]{64}$/.test(entered)) {
+        setProgress('Reading the deployment back from Bradbury…');
+        ({ contractAddress, transactionHash } = await marketContractFromDeployment(entered));
+      } else if (!/^0x[a-fA-F0-9]{40}$/.test(entered)) {
+        throw new Error('Enter the deployment transaction hash (0x, 64 hex) or the contract address (0x, 40 hex)');
+      }
+      setProgress(`Verifying ${contractAddress} against the locked binding…`);
+      await api.bindMarketContract(market.id, contractAddress, transactionHash);
+      await onBound(); setProgress(''); onMessage(`Market contract ${contractAddress} bound. Trading is on Bradbury now.`);
+    } catch (caught) { setProgress(''); onMessage((caught as Error).message); }
+    finally { setBusy(false); }
+  }
+  return <section className="panel bind-panel"><h2>Bind an existing market contract</h2><p>This market has a bound resolver but no <b>PredictionMarket</b>, so it is trading as a <b>simulation</b> and its fills move no GEN. If you already deployed one and the browser stopped waiting before Bradbury finalized it — that takes about fifteen minutes — attach it here rather than deploying a second one.</p><form onSubmit={bind}><label>Deployment transaction hash or contract address<input value={value} onChange={(event) => setValue(event.target.value)} placeholder="0x…" required /></label><button className="button primary" disabled={busy}>{busy ? 'Verifying…' : 'Verify and bind'}</button></form>{progress && <p className="progress-message" role="status">{progress}</p>}</section>;
+}
+
 function ResolvePanel({ market, address, onDone, onMessage }: { market: Market; address: string | null; onDone: () => Promise<void>; onMessage: (value: string) => void }) {
   const [busy, setBusy] = useState(false); const [progress, setProgress] = useState('');
   async function resolve() {
@@ -312,6 +350,9 @@ function MarketDetail({ address, id }: { address: string | null; id: string }) {
         {tab === 'settlement' && <section className="panel"><h2>Settlement state</h2><dl className="spec-list"><div><dt>Current stage</dt><dd><Status status={market.status} /></dd></div><div><dt>Preliminary outcome</dt><dd>{market.preliminaryOutcome || 'Not published'}</dd></div><div><dt>Final outcome</dt><dd>{market.outcome || 'Not finalized'}</dd></div><div><dt>Resolver</dt><dd className="mono">{market.resolverContractAddress || 'Not bound'}</dd></div><div><dt>Market contract</dt><dd className="mono">{market.marketContractAddress || 'Not deployed — this market is a simulation'}</dd></div><div><dt>Deployment tx</dt><dd className="mono">{market.marketDeploymentTx || '—'}</dd></div>{market.challengeWindowClosesAt && <div><dt>Challenge deadline</dt><dd>{utc(market.challengeWindowClosesAt)}</dd></div>}</dl></section>}
         {tab === 'activity' && <section className="panel"><h2>Recorded CPMM fills</h2><p>These rows are derived from accepted ledger trades, not generated UI statistics.</p><div className="fills-list">{market.recentTrades?.length ? market.recentTrades.map((trade) => <div key={trade.id}><b className={trade.side.toLowerCase()}>{trade.type.toUpperCase()} {trade.side}</b><span>{trade.shares.toFixed(4)} shares</span><span>{trade.price.toFixed(4)} GEN</span><span>{short(trade.trader)}</span><time>{utc(trade.timestamp)}</time></div>) : <p className="muted">No fills yet.</p>}</div></section>}
         {market.status === 'draft' && <ResolverBinder market={market} address={address} onBound={load} onMessage={setMessage} />}
+        {market.status !== 'draft' && market.resolverContractAddress && !market.marketContractAddress
+          && address && market.creator?.toLowerCase() === address.toLowerCase()
+          && <MarketContractBinder market={market} onBound={load} onMessage={setMessage} />}
         {!isOnChain(market) && <>
           {market.status === 'closed' && market.resolverContractAddress && <ResolvePanel market={market} address={address} onDone={load} onMessage={setMessage} />}
           {market.status === 'challenge_window' && <ChallengePanel market={market} address={address} onDone={load} onMessage={setMessage} />}
