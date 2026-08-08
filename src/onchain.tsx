@@ -110,7 +110,7 @@ export default function OnChainPanel({ market, address, onMessage }: { market: M
         <label>Stake (GEN)<div className="amount-input"><input aria-label="Challenge stake in GEN" inputMode="decimal" value={stake} onChange={(event) => setStake(event.target.value)} /><span>GEN</span></div></label>
         <button className="button amber wide" disabled={busy || !address || !reason.trim()} onClick={() => run('Challenge', () => challengeOnChain(contract, address!, reason, toWei(stake), setProgress))}>Stake and challenge</button>
       </>}
-      {stage === 'disputed' && <p>Challenged by {short(state.challenger)} for {money(fromWei(state.challengeStake))}. {state.disputeResolver.toLowerCase() === ZERO_ADDRESS ? 'No dispute resolver was committed at deployment, so the contract voids and refunds everyone — the challenger included — once the dispute window expires.' : 'The committed dispute resolver decides; the stake is refunded if it overturns the result and paid to the LPs if it upholds it.'}</p>}
+      {stage === 'disputed' && <p>Challenged by {short(state.challenger)} for {money(fromWei(state.challengeStake))}. Call <code>resolve()</code> on the dispute resolver ({short(state.disputeResolver)}) before the window closes: it decides, and the stake is refunded if it overturns the published result. If it has produced no finalized answer by then, the published outcome stands and the stake goes to the liquidity providers — so an unsubstantiated challenge cannot cancel the market.</p>}
       <button className="button secondary wide" disabled={busy || !address} onClick={() => run('Finalization', () => finalizeOnChain(contract, address!, setProgress))}>Finalize</button>
     </>}
     {stage === 'settled' && <>

@@ -17,7 +17,24 @@ if (process.env.CONFIRM_BRADBURY_DEPLOY !== 'YES') {
 const FEE_BPS = 200;
 const CHALLENGE_WINDOW_SECONDS = 600;
 const MIN_CHALLENGE_STAKE_WEI = 10n ** 17n; // 0.1 GEN
-const ZERO_ADDRESS = `0x${'00'.repeat(20)}`;
+/**
+ * The adjudicator every market deployed by this script will be bound to.
+ *
+ * There is no default. `PredictionMarket` refuses a zero dispute resolver, because
+ * a market that cannot adjudicate a challenge can only void on one, and that made
+ * the minimum stake a free option to cancel any market. This script binds markets
+ * to resolvers that already exist rather than deploying them, so it has nothing to
+ * clone into an adjudicator and asks for one instead. `npm run genlayer:live-demo`
+ * is the path that deploys its own.
+ */
+const DISPUTE_RESOLVER = process.env.DISPUTE_RESOLVER || '';
+if (!/^0x[a-fA-F0-9]{40}$/.test(DISPUTE_RESOLVER)) {
+  throw new Error(
+    'Set DISPUTE_RESOLVER=0x… to the adjudicator these markets should appeal to. It must be bound to the same '
+    + 'market ID, spec hash, sources hash and observation time as the resolver it adjudicates, or finalize() will '
+    + 'not accept its answer. Use `npm run genlayer:live-demo` for a market that deploys both resolvers itself.',
+  );
+}
 const POLL_INTERVAL_MS = 15_000;
 // Bradbury finality observed at roughly 15 minutes for a deployment (PROPOSING →
 // COMMITTING → APPEAL_COMMITTING → FINALIZED). 20 minutes leaves headroom without
@@ -66,7 +83,7 @@ for (const [key, entry] of Object.entries(manifest.contracts)) {
   // Constructor arguments come from the resolver's own finalized state, so the
   // market cannot be bound to a spec the resolver does not actually enforce.
   const args = [
-    binding.marketId, config.question, entry.address, ZERO_ADDRESS,
+    binding.marketId, config.question, entry.address, DISPUTE_RESOLVER,
     binding.resolutionSpecHash, binding.sourcesHash, binding.observationTime,
     FEE_BPS, CHALLENGE_WINDOW_SECONDS, MIN_CHALLENGE_STAKE_WEI,
   ];
@@ -117,6 +134,6 @@ const readable = (_, value) => {
 console.log(JSON.stringify({
   version: 3, network: 'GenLayer Bradbury Testnet', chainId: 4221, deployedAt: new Date().toISOString(),
   relayer: account.address, remainingBalanceWei: balance.toString(),
-  parameters: { feeBps: FEE_BPS, challengeWindowSeconds: CHALLENGE_WINDOW_SECONDS, minChallengeStakeWei: MIN_CHALLENGE_STAKE_WEI.toString(), disputeResolver: ZERO_ADDRESS },
+  parameters: { feeBps: FEE_BPS, challengeWindowSeconds: CHALLENGE_WINDOW_SECONDS, minChallengeStakeWei: MIN_CHALLENGE_STAKE_WEI.toString(), disputeResolver: DISPUTE_RESOLVER },
   markets: results,
 }, readable, 2));

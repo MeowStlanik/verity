@@ -47,7 +47,10 @@ export interface OnChainMarketState {
 export interface OnChainPosition {
   yesShares: bigint;
   noShares: bigint;
+  /** The VOID refund this position would be paid today: `yesCost + noCost`. */
   paidCost: bigint;
+  yesCost: bigint;
+  noCost: bigint;
   lpShares: bigint;
   claimed: boolean;
   lpClaimed: boolean;
@@ -165,6 +168,7 @@ export async function readPosition(marketAddress: string, account: string): Prom
   }) as Record<string, unknown>;
   return {
     yesShares: big(raw.yesShares), noShares: big(raw.noShares), paidCost: big(raw.paidCost),
+    yesCost: big(raw.yesCost), noCost: big(raw.noCost),
     lpShares: big(raw.lpShares), claimed: Boolean(raw.claimed), lpClaimed: Boolean(raw.lpClaimed),
   };
 }
@@ -188,8 +192,21 @@ export async function quoteOnChain(marketAddress: string, side: Side, action: 'b
 
 // ------------------------------------------------------------------ deploying
 
-export async function deployPredictionMarket(market: Market, account: string, progress: Progress = () => undefined) {
+/**
+ * @param disputeResolver the adjudicator a challenge on this market appeals to.
+ *   Required: the contract refuses a zero address, because a market that cannot
+ *   adjudicate a challenge can only void on one, which turns the minimum stake
+ *   into a free option to cancel any market. Deploy a second resolver over the
+ *   same locked spec and pass it here.
+ */
+export async function deployPredictionMarket(market: Market, account: string, disputeResolver: string, progress: Progress = () => undefined) {
   if (!market.resolverContractAddress) throw new Error('Deploy and bind the resolver before the market contract');
+  if (!/^0x[a-fA-F0-9]{40}$/.test(disputeResolver) || disputeResolver === ZERO_ADDRESS) {
+    throw new Error('Deploy the dispute resolver before the market contract');
+  }
+  if (disputeResolver.toLowerCase() === market.resolverContractAddress.toLowerCase()) {
+    throw new Error('The dispute resolver must not be the resolver it adjudicates');
+  }
   if (!market.resolutionSpecHash || !market.sourcesHash || !market.resolutionSpec.observationTime) {
     throw new Error('The draft is missing its immutable GenLayer binding');
   }
@@ -200,7 +217,7 @@ export async function deployPredictionMarket(market: Market, account: string, pr
   const hash = await client.deployContract({
     code: marketCode,
     args: [
-      market.id, market.title, market.resolverContractAddress, ZERO_ADDRESS,
+      market.id, market.title, market.resolverContractAddress, disputeResolver,
       market.resolutionSpecHash, market.sourcesHash, market.resolutionSpec.observationTime,
       market.feeBps, ON_CHAIN_CHALLENGE_WINDOW_SECONDS, ON_CHAIN_MIN_CHALLENGE_STAKE_WEI,
     ],

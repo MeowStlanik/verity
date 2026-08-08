@@ -210,14 +210,18 @@ function ResolverBinder({ market, address, onBound, onMessage }: { market: Marke
       const { deployMarketResolver } = await import('./genlayer');
       const deployment = await deployMarketResolver(market, address, setProgress);
       const bound = await api.bindResolver(market.id, deployment.contractAddress);
+      // A second instance of the same resolver over the same locked spec. The
+      // market contract will not deploy without an adjudicator to appeal to.
+      setProgress('Resolver verified. Confirm the dispute resolver deployment in MetaMask…');
+      const adjudicator = await deployMarketResolver(market, address, setProgress);
       const { deployPredictionMarket } = await import('./market');
-      const deployed = await deployPredictionMarket(bound, address, setProgress);
+      const deployed = await deployPredictionMarket(bound, address, adjudicator.contractAddress, setProgress);
       await api.bindMarketContract(bound.id, deployed.contractAddress, deployed.transactionHash);
       await onBound(); setProgress('Resolver and market contract verified. Trading is open on Bradbury.'); onMessage('Market is live on GenLayer Bradbury.');
     } catch (caught) { setProgress(''); onMessage((caught as Error).message); }
     finally { setBusy(false); }
   }
-  return <section className="panel bind-panel"><h2>Deploy market resolver</h2><p>This immutable draft will deploy <b>{market.resolutionSpec.resolver?.contract}</b> and then its <b>PredictionMarket</b> to GenLayer Bradbury, binding both finalized contracts automatically. Two MetaMask confirmations are required.</p><button className="button primary" disabled={busy || !address} onClick={deployAndBind}>{busy ? 'Deployment in progress…' : 'Deploy with MetaMask'}</button>{progress && <p className="progress-message" role="status">{progress}</p>}<details><summary>Advanced: bind an existing deployment</summary><pre>{JSON.stringify({ marketBinding: { marketId: market.id, resolutionSpecHash: market.resolutionSpecHash, sourcesHash: market.sourcesHash, observationTime: market.resolutionSpec.observationTime }, resolverConfig: { question: market.title, ...market.resolutionSpec.resolver?.args } }, null, 2)}</pre><form onSubmit={async (event) => {
+  return <section className="panel bind-panel"><h2>Deploy market resolver</h2><p>This immutable draft will deploy <b>{market.resolutionSpec.resolver?.contract}</b> twice — once as the resolver, once as the dispute resolver a challenge appeals to — and then its <b>PredictionMarket</b> bound to both. Three MetaMask confirmations are required.</p><button className="button primary" disabled={busy || !address} onClick={deployAndBind}>{busy ? 'Deployment in progress…' : 'Deploy with MetaMask'}</button>{progress && <p className="progress-message" role="status">{progress}</p>}<details><summary>Advanced: bind an existing deployment</summary><pre>{JSON.stringify({ marketBinding: { marketId: market.id, resolutionSpecHash: market.resolutionSpecHash, sourcesHash: market.sourcesHash, observationTime: market.resolutionSpec.observationTime }, resolverConfig: { question: market.title, ...market.resolutionSpec.resolver?.args } }, null, 2)}</pre><form onSubmit={async (event) => {
     event.preventDefault(); if (!address) return onMessage('Connect the creator wallet first');
     try { await api.bindResolver(market.id, resolver); await onBound(); onMessage('Resolver verified and bound. Trading is open.'); }
     catch (caught) { onMessage((caught as Error).message); }
@@ -374,9 +378,14 @@ function CreateMarket({ address }: { address: string | null }) {
       const { deployMarketResolver } = await import('./genlayer');
       const deployment = await deployMarketResolver(result.market, address, setMessage);
       const bound = await api.bindResolver(result.market.id, deployment.contractAddress);
-      setMessage('Resolver verified. Confirm the PredictionMarket deployment in MetaMask…');
+      // The adjudicator: the same resolver over the same locked spec, deployed a
+      // second time so a challenge has a fresh consensus round to appeal to. The
+      // market contract refuses to deploy without one.
+      setMessage('Resolver verified. Confirm the dispute resolver deployment in MetaMask…');
+      const adjudicator = await deployMarketResolver(result.market, address, setMessage);
+      setMessage('Dispute resolver deployed. Confirm the PredictionMarket deployment in MetaMask…');
       const { deployPredictionMarket } = await import('./market');
-      const deployed = await deployPredictionMarket(bound, address, setMessage);
+      const deployed = await deployPredictionMarket(bound, address, adjudicator.contractAddress, setMessage);
       await api.bindMarketContract(bound.id, deployed.contractAddress, deployed.transactionHash);
       go(`/markets/${bound.id}`);
     } catch (caught) { setMessage((caught as Error).message); }

@@ -1,10 +1,18 @@
 /**
- * Deploy a tradeable demo market on Bradbury: a fresh resolver whose observation
- * time is still ahead, the PredictionMarket bound to it, then real liquidity and a
- * real buy so the market is live rather than merely deployed.
+ * Deploy a tradeable demo market on Bradbury and move real GEN through it in both
+ * directions: a fresh resolver whose observation time is still ahead, a second
+ * resolver over the same locked spec to adjudicate disputes, the PredictionMarket
+ * bound to both, then liquidity, a buy, and a sell that pays GEN back out.
  *
  * The markets bound to the existing v2 resolvers all close in the past, so they can
  * be read but not traded. This one is the one to show.
+ *
+ * Two resolvers, not one. `PredictionMarket` refuses to deploy without a dispute
+ * resolver, because a market that cannot adjudicate a challenge can only void on
+ * one — which made the minimum stake a free cancel button. The adjudicator here is
+ * a second instance of the same contract over the same immutable spec: an appeal
+ * is a fresh consensus round re-reading the locked sources, not a different rule
+ * and not a human.
  *
  * Deployments use leaderOnly because full validator rounds were stalling in
  * commit/reveal when this was written; the constructors are deterministic, so
@@ -30,14 +38,20 @@ const MINUTES_UNTIL_CLOSE = Number(process.env.MINUTES_UNTIL_CLOSE || 45);
  */
 const RESUME_MINUTE = process.env.MARKET_MINUTE ? Number(process.env.MARKET_MINUTE) : null;
 const RESUME_RESOLVER_TX = process.env.RESOLVER_TX || null;
+const RESUME_DISPUTE_TX = process.env.DISPUTE_TX || null;
 const LIQUIDITY_WEI = 10n ** 18n / 2n;      // 0.5 GEN of liquidity
 const BUY_WEI = 10n ** 17n;                 // 0.1 GEN buy
+/** A quarter of the bought position, sold straight back. Small enough to leave a
+ *  live position on the book, large enough that the returned GEN is unmistakable. */
+const SELL_FRACTION = 4n;
 const FEE_BPS = 200;
 const CHALLENGE_WINDOW_SECONDS = 600;
 const MIN_CHALLENGE_STAKE_WEI = 10n ** 17n;
-const ZERO_ADDRESS = `0x${'00'.repeat(20)}`;
 const ACCEPT_INTERVAL_MS = 10_000;
 const ACCEPT_RETRIES = Number(process.env.ACCEPT_RETRIES || 60);
+/** The payout is emitted on finality, which is minutes behind acceptance, so the
+ *  wait for GEN to come back gets its own budget rather than the accept budget. */
+const PAYOUT_RETRIES = Number(process.env.PAYOUT_RETRIES || 150);
 /** How many deployments to race. Cheap on testnet, and the losers hurt nobody. */
 const RACE_WIDTH = Number(process.env.RACE_WIDTH || 5);
 
@@ -223,18 +237,36 @@ const deployResolver = () => client.deployContract({
     ...sources.flatMap((s) => [s.url, s.jsonPath, s.timestampPath, s.timestampValue]),
     resolverArgs.comparator, resolverArgs.scale, resolverArgs.thresholdUnits, resolverArgs.maxSourceSpreadUnits],
 });
+/** Resume a specific in-flight deployment on the first attempt of a race. */
+const withResume = (hash, submit) => {
+  let pending = hash;
+  return () => {
+    const next = pending || submit();
+    pending = null;
+    return next;
+  };
+};
+
 if (RESUME_RESOLVER_TX) log(`resuming with resolver deployment ${RESUME_RESOLVER_TX}`);
-let resumed = RESUME_RESOLVER_TX;
-const resolverAddress = await deployRaced('resolver deploy', () => {
-  const hash = resumed || deployResolver();
-  resumed = null;
-  return hash;
-}, 'market_binding', resumed ? 1 : RACE_WIDTH);
+const resolverAddress = await deployRaced('resolver deploy', withResume(RESUME_RESOLVER_TX, deployResolver),
+  'market_binding', RESUME_RESOLVER_TX ? 1 : RACE_WIDTH);
+
+// The adjudicator is deployed from the same source with the same constructor
+// arguments, so it is bound to this market exactly as the primary resolver is and
+// `finalize()` will accept its answer. Identical rule, independent round: an appeal
+// re-reads the locked sources under a fresh consensus, and a leader that misread
+// them the first time has no way to repeat the mistake on demand.
+if (RESUME_DISPUTE_TX) log(`resuming with dispute resolver deployment ${RESUME_DISPUTE_TX}`);
+const disputeResolverAddress = await deployRaced('dispute resolver deploy', withResume(RESUME_DISPUTE_TX, deployResolver),
+  'market_binding', RESUME_DISPUTE_TX ? 1 : RACE_WIDTH);
+if (disputeResolverAddress.toLowerCase() === resolverAddress.toLowerCase()) {
+  throw new Error('The adjudicator raced to the same address as the resolver it adjudicates');
+}
 
 const marketCode = await readFile(new URL('genlayer/contracts/PredictionMarket.py', root), 'utf8');
 const marketAddress = await deployRaced('market deploy', () => client.deployContract({
   code: marketCode, leaderOnly: true,
-  args: [marketId, title, resolverAddress, ZERO_ADDRESS, resolutionSpecHash, sourcesHash, observationTime,
+  args: [marketId, title, resolverAddress, disputeResolverAddress, resolutionSpecHash, sourcesHash, observationTime,
     FEE_BPS, CHALLENGE_WINDOW_SECONDS, MIN_CHALLENGE_STAKE_WEI],
 }), 'market_state');
 
@@ -263,6 +295,55 @@ const buyTx = await writeUntilEffective(
   { value: BUY_WEI },
 );
 
+// Money out. Taking GEN in is only half of a custody claim: until the contract has
+// paid some back, "it holds your funds" and "it has your funds" look identical from
+// the outside. A sale is the shortest path to the payout code — the same `_pay` that
+// `claim()` and `claim_liquidity()` use — and it can run now rather than after the
+// observation time and the challenge window.
+const bought = BigInt((await client.readContract({
+  address: marketAddress, functionName: 'position_of', args: [account.address], transactionHashVariant: 'latest-nonfinal',
+})).yesShares);
+const sellShares = bought / SELL_FRACTION;
+if (sellShares <= 0n) throw new Error('The buy left no shares to sell back');
+const sellQuote = await client.readContract({
+  address: marketAddress, functionName: 'quote_sell', args: ['YES', sellShares], transactionHashVariant: 'latest-nonfinal',
+});
+const balanceBeforeSell = await client.getBalance({ address: account.address });
+const sellTx = await writeUntilEffective(
+  'sell_yes',
+  () => client.writeContract({
+    address: marketAddress, functionName: 'sell_yes',
+    args: [sellShares, 0, Math.floor(Date.now() / 1000) + 900], value: 0n, leaderOnly: true,
+  }),
+  (before, now) => BigInt(now.totalYesShares) < BigInt(before.totalYesShares),
+);
+
+/**
+ * Wait for the GEN itself, not for the bookkeeping.
+ *
+ * `_pay` emits its transfer `on: 'finalized'`, so the shares are retired and the
+ * collateral is decremented the moment the sale is accepted, while the value moves
+ * only once the transaction finalizes. Watching `market_state` would therefore
+ * report success before a single wei had left the contract. This watches the
+ * deployer's own balance instead, which is the only evidence that the payout path
+ * works end to end.
+ */
+async function waitForPayout(from, expected) {
+  for (let round = 0; round < PAYOUT_RETRIES; round += 1) {
+    const now = await client.getBalance({ address: account.address });
+    // Gas for the sale itself comes out of the same balance, so a payout that has
+    // landed shows up as a rise above where the balance sat after paying for it.
+    if (now > from) {
+      log(`sell_yes: ${now - from} wei arrived (quoted ${expected})`);
+      return now - from;
+    }
+    await new Promise((resolve) => setTimeout(resolve, ACCEPT_INTERVAL_MS));
+  }
+  log(`sell_yes: no payout observed within ${ACCEPT_INTERVAL_MS * PAYOUT_RETRIES / 1000}s; the transfer is emitted on finality, so re-check the balance later`);
+  return null;
+}
+const payoutObserved = await waitForPayout(balanceBeforeSell, BigInt(sellQuote.amountOut));
+
 const state = await client.readContract({ address: marketAddress, functionName: 'market_state', args: [], transactionHashVariant: 'latest-nonfinal' });
 const position = await client.readContract({ address: marketAddress, functionName: 'position_of', args: [account.address], transactionHashVariant: 'latest-nonfinal' });
 const balance = await client.getBalance({ address: account.address });
@@ -276,10 +357,17 @@ console.log(JSON.stringify({
   network: 'GenLayer Bradbury Testnet', chainId: 4221, deployedAt: new Date().toISOString(),
   marketId, title, observationTime, resolutionSpecHash, sourcesHash,
   resolver: { address: resolverAddress },
+  disputeResolver: { address: disputeResolverAddress },
   market: { address: marketAddress },
-  transactions: { addLiquidity: liquidityTx, buyYes: buyTx },
+  transactions: { addLiquidity: liquidityTx, buyYes: buyTx, sellYes: sellTx },
+  valuePath: {
+    inWei: (LIQUIDITY_WEI + BUY_WEI).toString(),
+    soldShares: sellShares.toString(),
+    quotedOutWei: String(sellQuote.amountOut),
+    observedOutWei: payoutObserved === null ? null : payoutObserved.toString(),
+  },
   liquidityWei: LIQUIDITY_WEI.toString(), buyWei: BUY_WEI.toString(),
   state, position, relayer: account.address, remainingBalanceWei: balance.toString(),
-  note: 'Deployed leader-only and reported at ACCEPTED, which is when a contract becomes callable. Finality follows after the appeal window; run `npm run genlayer:finalize` for the FINALIZED status.',
+  note: 'Deployed leader-only and reported at ACCEPTED, which is when a contract becomes callable. Finality follows after the appeal window; run `npm run genlayer:finalize` for the FINALIZED status. `observedOutWei` is null when the sale had not finalized before the script stopped waiting — the payout is emitted on finality, so re-check the balance rather than re-sending.',
   sources, resolutionSpec,
 }, readable, 2));

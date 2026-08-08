@@ -88,13 +88,18 @@ def _isqrt(value: int) -> int:
 class Position:
     """Everything this contract owes, or has already paid, one address at a time.
 
-    Six separate `TreeMap`s used to hold these fields. One map of a record stores
-    the same state in a sixth of the trees, which is both less storage schema to
-    generate at deployment and one lookup per address instead of six.
+    One `TreeMap` per field used to hold this. A single map of records stores the
+    same state in one tree instead of seven, which is both less storage schema to
+    generate at deployment and one lookup per address instead of one per field.
+
+    The VOID refund basis is held as `yes_cost` and `no_cost` rather than as one
+    total, because the two legs of a mixed position are retired independently and
+    a single total cannot say which of them a sale just cashed out.
     """
     yes_shares: gl.u256
     no_shares: gl.u256
-    paid_cost: gl.u256
+    yes_cost: gl.u256
+    no_cost: gl.u256
     lp_shares: gl.u256
     claimed: bool
     lp_claimed: bool
@@ -149,6 +154,17 @@ class PredictionMarket(gl.Contract):
             raise ValueError("challenge window must be at least 60 seconds")
         if min_challenge_stake <= 0:
             raise ValueError("minimum challenge stake must be positive")
+        # A market with no adjudicator has no way to tell a right challenge from a
+        # wrong one, and the only safe thing it could do with a challenge it cannot
+        # judge is void. That makes the minimum stake a free option to cancel any
+        # market, so the configuration is refused at deployment instead of being
+        # documented as a limitation.
+        if gl.Address(dispute_resolver).as_bytes == ZERO:
+            raise ValueError("a dispute resolver is required")
+        # An adjudicator that is the resolver under dispute would uphold itself
+        # every time, which is the same market with extra steps.
+        if gl.Address(dispute_resolver).as_bytes == gl.Address(resolver).as_bytes:
+            raise ValueError("the dispute resolver must not be the resolver it adjudicates")
         # Rejects a malformed observation time at deployment rather than at
         # settlement, when the market would already hold other people's money.
         _epoch(observation_time)
@@ -370,11 +386,14 @@ class PredictionMarket(gl.Contract):
         self.collateral = gl.u256(int(self.collateral) + gross)
         self.accrued_fees = gl.u256(int(self.accrued_fees) + fee)
         position = self.positions.get_or_insert_default(sender)
+        # Cost is booked against the side it bought, so a later sale of one leg can
+        # be priced against that leg's own basis.
         if side_yes:
             position.yes_shares = gl.u256(int(position.yes_shares) + shares)
+            position.yes_cost = gl.u256(int(position.yes_cost) + gross)
         else:
             position.no_shares = gl.u256(int(position.no_shares) + shares)
-        position.paid_cost = gl.u256(int(position.paid_cost) + gross)
+            position.no_cost = gl.u256(int(position.no_cost) + gross)
 
     @gl.public.write
     def sell_yes(self, shares: int, min_amount_out: int, deadline: int) -> None:
@@ -396,16 +415,25 @@ class PredictionMarket(gl.Contract):
             raise ValueError("price moved beyond the requested limit")
 
         # A sale gives back the share of the paid cost that it retires, so a VOID
-        # refund can never pay for shares the trader has already cashed out.
-        cost = int(position.paid_cost)
-        retired = cost * shares // held if held else 0
+        # refund can never pay for shares the trader has already cashed out — and
+        # it retires that cost from the side being sold only. Charging a mixed
+        # position's whole basis against one leg wiped the refund on shares the
+        # trader still held when the sold leg was the smaller one, and left the
+        # refund untouched when it was the larger.
+        cost = int(position.yes_cost if side_yes else position.no_cost)
+        # Rounded up, so a sale never retires less basis than it is worth. Rounding
+        # down let a trader dribble out a large, cheap side a few shares at a time,
+        # retire nothing each round, and keep a VOID refund bigger than what they
+        # still had at risk — an over-refund the collateral would have to cover.
+        retired = -(-cost * shares // held) if held else 0
         out_reserve, in_reserve = self._reserves(side_yes)
         self._write_reserves(side_yes, out_reserve + to_pool, in_reserve - gross)
         if side_yes:
             position.yes_shares = gl.u256(held - shares)
+            position.yes_cost = gl.u256(cost - retired)
         else:
             position.no_shares = gl.u256(held - shares)
-        position.paid_cost = gl.u256(cost - retired)
+            position.no_cost = gl.u256(cost - retired)
         self.refund_liability = gl.u256(max(0, int(self.refund_liability) - retired))
         if side_yes:
             self.total_yes_shares = gl.u256(int(self.total_yes_shares) - shares)
@@ -474,12 +502,12 @@ class PredictionMarket(gl.Contract):
             self._settle(self.preliminary_outcome, refund_stake=False)
             return self.final_outcome
 
-        adjudicated = None
-        if self.dispute_resolver.as_bytes != ZERO:
-            try:
-                adjudicated = self._read_resolver(self.dispute_resolver)["outcome"]
-            except Exception:
-                adjudicated = None
+        # There is always an adjudicator to ask — the constructor refuses a market
+        # without one — but it may not have been resolved yet.
+        try:
+            adjudicated = self._read_resolver(self.dispute_resolver)["outcome"]
+        except Exception:
+            adjudicated = None
         if adjudicated is not None:
             # An adjudicator that upholds the published outcome makes the
             # challenge wrong, and the stake pays the LPs who carried the delay.
@@ -487,10 +515,15 @@ class PredictionMarket(gl.Contract):
             return self.final_outcome
         if not expired:
             raise ValueError("the dispute window is still open")
-        # No adjudicator produced a finalized answer. The contract will not guess:
-        # it voids and refunds everyone, including the challenger's stake, because
-        # nothing on chain says the challenge was wrong.
-        self._settle(VOID, refund_stake=True)
+        # The dispute window closed and the adjudicator still says nothing. That is
+        # not evidence for the challenge: `resolve()` on the adjudicator is
+        # permissionless, so a challenger with a real objection had the whole window
+        # to trigger it and produce an answer. The published outcome — which *did*
+        # come from a finalized resolver — stands, and the stake pays the LPs who
+        # carried the delay. Voiding here instead, as this contract used to, made
+        # the minimum stake a free option to cancel any market: the griefer got
+        # their stake back and every winning position was refunded away.
+        self._settle(self.preliminary_outcome, refund_stake=False)
         return self.final_outcome
 
     def _settle(self, outcome: str, refund_stake: bool):
@@ -528,7 +561,8 @@ class PredictionMarket(gl.Contract):
         if position.claimed:
             raise ValueError("this address has already claimed")
         if self.final_outcome == VOID:
-            payout = int(position.paid_cost)
+            # Both legs are refunded: a mixed position paid for both of them.
+            payout = int(position.yes_cost) + int(position.no_cost)
         elif self.final_outcome == YES:
             payout = int(position.yes_shares)
         else:
@@ -540,7 +574,8 @@ class PredictionMarket(gl.Contract):
         position.claimed = True
         position.yes_shares = gl.u256(0)
         position.no_shares = gl.u256(0)
-        position.paid_cost = gl.u256(0)
+        position.yes_cost = gl.u256(0)
+        position.no_cost = gl.u256(0)
         self._pay(sender, payout)
 
     @gl.public.write
@@ -616,13 +651,18 @@ class PredictionMarket(gl.Contract):
         # anyone ever asks about.
         if who not in self.positions:
             return {"address": who, "yesShares": 0, "noShares": 0, "paidCost": 0,
+                    "yesCost": 0, "noCost": 0,
                     "lpShares": 0, "claimed": False, "lpClaimed": False}
         position = self.positions[who]
         return {
             "address": who,
             "yesShares": position.yes_shares,
             "noShares": position.no_shares,
-            "paidCost": position.paid_cost,
+            # `paidCost` is the VOID refund this position would be paid today; the
+            # per-side figures below are what it is actually made of.
+            "paidCost": int(position.yes_cost) + int(position.no_cost),
+            "yesCost": position.yes_cost,
+            "noCost": position.no_cost,
             "lpShares": position.lp_shares,
             "claimed": position.claimed,
             "lpClaimed": position.lp_claimed,

@@ -17,7 +17,7 @@ call through which the creator, a keeper or a challenger can choose an outcome.
 | `sell_yes / sell_no(shares, min_amount_out, deadline)` | exact integer inverse of the buy curve |
 | `publish_preliminary()` | parameterless; copies the resolver's finalized outcome in |
 | `challenge(reason)` | payable; stake must reach `min_challenge_stake` |
-| `finalize()` | uncontested → preliminary; disputed → dispute resolver or VOID fallback |
+| `finalize()` | uncontested → preliminary; disputed → the adjudicator's answer, or the preliminary outcome if it never produced one |
 | `claim()` / `claim_liquidity()` | one-shot payout and LP residual |
 | `market_state()`, `quote_buy()`, `quote_sell()`, `position_of()` | views |
 
@@ -37,12 +37,28 @@ Properties worth knowing:
 - **YES, NO and VOID all open the same challenge window,** and a published
   preliminary outcome can never be replaced — not even by a resolver that later
   reports something else.
-- **The challenge stake is never stranded.** Upheld challenge → refunded;
-  rejected by a committed dispute resolver → paid to the LPs; no adjudicator
-  available → the market voids and the stake is refunded.
+- **A dispute resolver is mandatory.** The constructor refuses the zero address,
+  and refuses an adjudicator that is the resolver it would be adjudicating.
+- **The challenge stake is never stranded.** Overturned by the adjudicator →
+  refunded; upheld by the adjudicator → paid to the LPs; adjudicator silent when
+  the dispute window closes → paid to the LPs, because an unsubstantiated
+  challenge is a delay someone has to be paid for.
+- **VOID cost basis is tracked per side.** `yes_cost` and `no_cost` are separate,
+  so cashing out one leg of a hedged position retires that leg's refundable cost
+  and nothing else. The retired amount rounds up, which can only ever leave the
+  pool better off.
 - **Effects precede transfers.** GenLayer messages are asynchronous, so positions
   are retired and `collateral` is decremented before `emit_transfer` is called,
   and accounting never reads `self.balance`, which lags emitted transfers.
+- **Payouts are emitted `on: 'finalized'`, and that is not a bug.** A sale, a
+  claim or an LP withdrawal updates the contract's state the moment it is
+  *accepted*, but the GEN itself does not move until the transaction *finalizes* —
+  which on Bradbury is minutes behind, sometimes considerably. So there is a real
+  window where `market_state()` shows the collateral already gone and the wallet
+  balance has not risen yet. Paying on `accepted` instead would close that window
+  and open a much worse one: a round that consensus later rolls back would have
+  moved the money anyway, and the same position could be paid twice. Wait for the
+  balance, and never re-send a payout because the GEN "did not arrive".
 
 ### Sources have a shelf life, and the spec has to respect it
 
@@ -74,18 +90,44 @@ The API is what records the pair, and it verifies the deployed contract's own
 `market_state()` against the locked draft before accepting either address — which
 is the guarantee a factory would have been providing.
 
-### Known limitation: the dispute path
+### The dispute path
 
-A `dispute_resolver` address is fixed at construction and cannot be added later.
-When one is committed, a challenge is adjudicated by it. When it is the zero
-address — which is what the deploy script and the dApp currently use — a
-challenge cannot be adjudicated on chain at all, so once the dispute window
-expires the contract **voids the market and refunds everyone, the challenger
-included**. That is safe but it is also a griefing vector: anyone willing to lock
-the minimum stake for the length of the dispute window can force any market to
-VOID. Committing a dispute resolver at deployment removes it, because a rejected
-challenge then forfeits its stake. This is written down rather than papered over;
-a production system needs an escalation game with real slashing.
+A `dispute_resolver` address is fixed at construction and cannot be added later,
+so it has to be right at deployment — and the constructor now enforces that it
+*is* one. A market cannot be deployed with the zero address, and it cannot name
+its own resolver as its appeal court.
+
+**What the adjudicator is.** A second instance of the same resolver contract over
+the same immutable spec: same market ID, same spec and sources hashes, same
+observation time, same locked URLs. `finalize()` checks that binding before it
+will accept an answer, exactly as `publish_preliminary()` does for the primary.
+An appeal is therefore a *fresh consensus round re-reading the locked sources* —
+not a different rule, not a committee, and not the market creator. A leader that
+misread a source the first time has no way to reproduce the misreading on demand;
+a leader that read it correctly is confirmed.
+
+**How a challenge resolves.** `resolve()` on the adjudicator is permissionless,
+so a challenger with a real objection triggers it themselves and pays for it.
+
+| At the end of the dispute window | Outcome | Stake |
+| --- | --- | --- |
+| Adjudicator overturned the published result | the adjudicator's answer | refunded |
+| Adjudicator upheld the published result | published outcome | to the LPs |
+| Adjudicator never produced a finalized answer | published outcome | to the LPs |
+
+**Why the last row is not VOID.** It used to be, and that made the minimum stake a
+free option to cancel any market: lock the stake, never trigger the adjudicator,
+wait out the window, and the market voids while the stake comes back. Every
+winning position was refunded to its cost basis by someone with nothing at risk.
+Silence from an adjudicator anyone could have called is not evidence of anything,
+whereas the published outcome did come from a finalized resolver — so the
+published outcome stands, and the stake pays the LPs who carried the delay.
+
+The trade-off is stated rather than hidden: a challenger who is right, and whose
+adjudicator is genuinely unreachable for the whole window, loses their stake and
+the wrong result stands. That is the standard optimistic default, and it is
+strictly better than handing a cancel button to anyone with the minimum stake. A
+production system wants a longer escalation game with real slashing on top of it.
 
 ## Resolvers
 
@@ -103,7 +145,8 @@ All web/LLM work executes in `gl.vm.run_nondet`, so a validator independently re
 
 - **No floating point on the value path.** `NumericResolver` reads source numbers with `parse_float=str` and converts the literal text to scaled units with integer arithmetic. `int(float("0.29") * 100)` is `28`, which resolved a market sitting exactly on its threshold the wrong way.
 - **An unusable source set is data, not an exception.** The leader returns `{"ok": false}` rather than raising, so leader and validator can *agree* that the market is unresolvable and settle VOID, instead of erroring out separately and failing consensus.
-- **Validators compare the decision, not the bytes.** Per-source votes and page digests differ between nodes by design; only the settled label (or, for numeric markets, the median within the locked tolerance) has to match.
+- **Validators compare the decision, not the bytes.** Per-source votes and page digests differ between nodes by design; only the settled label has to match.
+- **A numeric validator checks the payout, not just the distance.** The leader's median must be within the locked spread tolerance of the validator's own median **and** on the same side of the payout threshold. Distance alone is not agreement: the tolerance is an inter-exchange spread and is far wider than the distance to the strike for any market trading near it, so accepting on distance alone let a leader choose the winning side of a close market while every validator nodded along.
 - **Every resolution is evidenced.** `resolved_at` comes from the transaction datetime and `source_digests` holds a Keccak-256 digest of each fetched body, both written in the same transaction as the outcome.
 - **Binding is checked, not trusted.** `market_binding()` exposes the four identity hashes/values and `resolver_config()` exposes the actual executable source/rule constructor data. The API compares both, so copying the right hashes into a resolver with malicious URLs does not work.
 - **Numeric observation time is exact.** Each numeric JSON source has a locked timestamp path and its own locked `timestampValue` (seconds, milliseconds or ISO as that source represents it). Calling the resolver later cannot silently substitute a later spot price.
@@ -120,6 +163,24 @@ Run syntax validation with `npm run genlayer:syntax` and the resolver tests with
 MARKET_ID=... GENLAYER_RESOLVER_CONTRACT=0x... GENLAYER_RESOLUTION_TX=0x... RESOLVER_API_KEY=... npm run resolver:publish
 ```
 
+## The live Bradbury market
+
+One market where GEN has actually moved, both ways, deployed by
+`npm run genlayer:live-demo`:
+
+| Role | Contract |
+| --- | --- |
+| `PredictionMarket` | `0x76A08Db659dFa651c0d358a39ECe445A65fB08aE` |
+| resolver | `0x9eE00cEB83880F466Ad8Cbe7D1D15Ea0baCD3d80` |
+| dispute resolver | `0xA21bad07eDeD9ABEe11413C2025624A7beC2391e` |
+
+Both resolvers are `NumericResolver` instances over the same locked spec — the same
+market ID, spec hash, sources hash and observation minute — which is what makes the
+second one a valid appeal court for the first: `finalize()` checks that binding
+before it will accept an answer. The full record, including the wei observed
+returning to the deployer, is in
+[`deployments/bradbury-live-demo.json`](deployments/bradbury-live-demo.json).
+
 ## Bradbury v2 deployments
 
 Finalized market-bound smoke deployments are recorded in [`deployments/bradbury-v2.json`](deployments/bradbury-v2.json). Check all three once, without polling or a private key:
@@ -133,6 +194,8 @@ npm run genlayer:status
 - Judgment: `0xaC520A14258c8af8d6Edf3937280F6B183120E7e`
 
 All three deployment transactions are `FINALIZED` and `FINISHED_WITH_RETURN`; their bindings/configs were read back from finalized state. Outcomes remain intentionally `PENDING`: no extra resolution transactions were sent. They are smoke markets and cannot be reused for unrelated market IDs/specs.
+
+The `PredictionMarket` contracts bound to these three resolvers are **superseded**. They were deployed with a zero dispute resolver — the configuration the constructor now refuses — so a challenge against any of them could not be adjudicated and the minimum stake would force VOID. They also predate the per-side VOID cost basis. The resolvers themselves are unaffected; only the market contracts are stale, and their addresses are kept in the root README as history.
 
 ## Legacy Bradbury deployment
 

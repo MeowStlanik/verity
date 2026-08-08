@@ -99,6 +99,18 @@ class NumericResolver(gl.Contract):
                    (self.source_c, self.path_c, self.timestamp_path_c, self.timestamp_value_c)]
         scale = int(self.scale)
         tolerance = int(self.max_source_spread_units)
+        comparator = self.comparator
+        threshold = int(self.threshold_units)
+
+        def decide(units: int) -> str:
+            """The payout this many units implies. Locked constructor state only."""
+            if comparator == "GT":
+                return "YES" if units > threshold else "NO"
+            if comparator == "GTE":
+                return "YES" if units >= threshold else "NO"
+            if comparator == "LT":
+                return "YES" if units < threshold else "NO"
+            return "YES" if units <= threshold else "NO"
 
         def to_units(text: str) -> int:
             """Exact conversion of a decimal literal to scaled integer units."""
@@ -188,7 +200,16 @@ class NumericResolver(gl.Contract):
                 return proposed["ok"] == local["ok"]
             # Source digests are the leader's snapshot and are expected to differ
             # between nodes; only the number the market settles on has to agree.
-            return abs(int(local["units"]) - int(proposed["units"])) <= tolerance
+            if abs(int(local["units"]) - int(proposed["units"])) > tolerance:
+                return False
+            # Agreeing "within tolerance" is not the same as agreeing on the
+            # outcome. The tolerance is a spread between exchanges, and it is much
+            # wider than the distance to the threshold whenever a market is close
+            # to its strike — so a leader whose median sits just the other side of
+            # the threshold would otherwise be accepted, and would pay the losing
+            # side. Two numbers that disagree about who gets paid are a
+            # disagreement, however close together they are.
+            return decide(int(local["units"])) == decide(int(proposed["units"]))
 
         observation = gl.vm.run_nondet(leader, validator)
         self.resolved_at = gl.message_raw["datetime"]
@@ -200,17 +221,11 @@ class NumericResolver(gl.Contract):
             return self.outcome
 
         value = int(observation["units"])
-        threshold = int(self.threshold_units)
         self.median_value_units = gl.bigint(value)
-        if self.comparator == "GT":
-            self.outcome = "YES" if value > threshold else "NO"
-        elif self.comparator == "GTE":
-            self.outcome = "YES" if value >= threshold else "NO"
-        elif self.comparator == "LT":
-            self.outcome = "YES" if value < threshold else "NO"
-        else:
-            self.outcome = "YES" if value <= threshold else "NO"
-        self.evidence = "median=" + str(value) + " " + self.comparator + " threshold=" + str(threshold)
+        # The same `decide` the validator agreed on, so the stored outcome cannot
+        # drift from the rule consensus was reached under.
+        self.outcome = decide(value)
+        self.evidence = "median=" + str(value) + " " + comparator + " threshold=" + str(threshold)
         return self.outcome
 
     @gl.public.view

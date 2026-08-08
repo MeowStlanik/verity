@@ -81,7 +81,7 @@ def chain(direct_vm):
     return Chain(direct_vm)
 
 
-def deploy(direct_deploy, dispute=ZERO, fee_bps=200, window=WINDOW, min_stake=GEN // 10):
+def deploy(direct_deploy, dispute=DISPUTE, fee_bps=200, window=WINDOW, min_stake=GEN // 10):
     return direct_deploy("genlayer/contracts/PredictionMarket.py", "m1", "Will it happen?",
                          RESOLVER, dispute, SPEC, SOURCES, CLOSE, fee_bps, window, min_stake)
 
@@ -182,14 +182,17 @@ def test_sell_returns_gen_and_retires_the_position(direct_vm, direct_deploy, cha
     market = funded(direct_vm, direct_deploy)
     buy(direct_vm, market, "YES", 10 * GEN)
     held = market.position_of(address_of(direct_vm.sender))["yesShares"]
-    quote = market.quote_sell("YES", held // 2)
-    market.sell_yes(held // 2, quote["amountOut"], 0)
+    sold = held // 2
+    quote = market.quote_sell("YES", sold)
+    market.sell_yes(sold, quote["amountOut"], 0)
     position = market.position_of(address_of(direct_vm.sender))
-    assert position["yesShares"] == held - held // 2
+    assert position["yesShares"] == held - sold
     assert chain.paid(address_of(direct_vm.sender)) == quote["amountOut"]
     # Selling half the shares gives back half the refundable cost, so a later VOID
-    # cannot refund a position that has already been cashed out.
-    assert position["paidCost"] == 10 * GEN - (10 * GEN * (held // 2) // held)
+    # cannot refund a position that has already been cashed out. The retired half
+    # rounds up, which can only ever leave the trader claiming less than they hold.
+    retired = -(-10 * GEN * sold // held)
+    assert position["paidCost"] == 10 * GEN - retired
 
 
 def test_selling_more_than_held_is_rejected(direct_vm, direct_deploy, chain):
@@ -371,34 +374,80 @@ def test_an_upheld_outcome_forfeits_the_stake_to_the_pool(direct_vm, direct_depl
     assert state["lpResidual"] >= 100 * GEN + GEN
 
 
-def test_without_an_adjudicator_a_dispute_voids_and_refunds_the_stake(direct_vm, direct_deploy, chain):
+def test_a_market_without_an_adjudicator_cannot_be_deployed(direct_vm, direct_deploy, chain):
+    """The griefing vector is closed at its source: the configuration is refused.
+
+    A market with no dispute resolver has no way to tell a right challenge from a
+    wrong one, so the only thing it could safely do with one is void — which is
+    what made the minimum stake a free cancel button.
+    """
+    with direct_vm.expect_revert("dispute resolver is required"):
+        deploy(direct_deploy, dispute=ZERO)
+
+
+def test_a_resolver_cannot_adjudicate_its_own_result(direct_vm, direct_deploy, chain):
+    """Naming the resolver as its own appeal court satisfies the letter of the
+    requirement and none of it: it would uphold itself on every challenge."""
+    with direct_vm.expect_revert("must not be the resolver it adjudicates"):
+        deploy(direct_deploy, dispute=RESOLVER)
+
+
+def test_a_minimum_stake_challenge_cannot_force_a_void(direct_vm, direct_deploy, chain, direct_alice, direct_bob):
+    """The griefing path this contract used to have, priced out.
+
+    Alice backs YES and is right. Bob holds nothing, stakes exactly the minimum
+    against a correct result, and then simply waits: he never triggers the
+    adjudicator, so the dispute window closes with nothing on chain behind his
+    objection. The market must still settle YES and pay Alice per share, and Bob
+    must lose the stake — under the old fallback he got it back, and Alice's
+    winning position was refunded away to its cost basis.
+    """
     market = funded(direct_vm, direct_deploy)
+    with direct_vm.prank(direct_alice):
+        buy(direct_vm, market, "YES", 10 * GEN)
+        shares = market.position_of(address_of(direct_alice))["yesShares"]
     chain.set_resolver(RESOLVER, "YES")
-    warp(direct_vm, AFTER_CLOSE)
-    market.publish_preliminary()
-    direct_vm.value = 2 * GEN
-    market.challenge("the resolver used the wrong candle")
-    direct_vm.value = 0
-    warp(direct_vm, "2026-09-01T02:00:00Z")
-    # Nothing on chain says the challenge was wrong, so the contract refuses to
-    # guess: everyone is made whole, the challenger included.
-    assert market.finalize() == "VOID"
-    assert market.market_state()["challengeSettled"] is True
-    assert chain.paid(address_of(direct_vm.sender)) == 2 * GEN
-
-
-def test_a_silent_dispute_resolver_falls_back_to_void(direct_vm, direct_deploy, chain):
-    market = funded(direct_vm, direct_deploy, dispute=DISPUTE)
-    chain.set_resolver(RESOLVER, "NO")
     chain.set_resolver(DISPUTE, "PENDING")
     warp(direct_vm, AFTER_CLOSE)
     market.publish_preliminary()
-    direct_vm.value = GEN
-    market.challenge("please re-read the sources")
-    direct_vm.value = 0
+    with direct_vm.prank(direct_bob):
+        direct_vm.value = GEN // 10  # exactly min_challenge_stake
+        market.challenge("I would rather this market did not settle")
+        direct_vm.value = 0
     warp(direct_vm, "2026-09-01T02:00:00Z")
+
+    assert market.finalize() == "YES"
+    state = market.market_state()
+    assert state["challengeSettled"] is True
+    assert chain.paid(address_of(direct_bob)) == 0
+    # The forfeited stake is LP revenue, and the winner is still fully covered.
+    assert state["lpResidual"] == state["collateral"] - shares
+    with direct_vm.prank(direct_alice):
+        market.claim()
+    assert chain.paid(address_of(direct_alice)) == shares
+
+
+def test_an_adjudicated_void_still_refunds_the_challenger(direct_vm, direct_deploy, chain, direct_alice):
+    """VOID after a challenge is still reachable — it just needs evidence now.
+
+    An adjudicator that finalizes VOID overturns the published YES, so the
+    challenge was right and the stake comes back.
+    """
+    market = funded(direct_vm, direct_deploy)
+    with direct_vm.prank(direct_alice):
+        buy(direct_vm, market, "YES", 10 * GEN)
+    chain.set_resolver(RESOLVER, "YES")
+    chain.set_resolver(DISPUTE, "VOID")
+    warp(direct_vm, AFTER_CLOSE)
+    market.publish_preliminary()
+    direct_vm.value = GEN
+    market.challenge("the locked candle was never published")
+    direct_vm.value = 0
     assert market.finalize() == "VOID"
     assert chain.paid(address_of(direct_vm.sender)) == GEN
+    with direct_vm.prank(direct_alice):
+        market.claim()
+    assert chain.paid(address_of(direct_alice)) == 10 * GEN
 
 
 # --------------------------------------------------------------------- payouts
@@ -440,6 +489,62 @@ def test_void_refunds_exactly_what_the_trader_paid(direct_vm, direct_deploy, cha
         market.claim()
     assert chain.paid(address_of(direct_alice)) == 10 * GEN
     assert chain.paid(address_of(direct_bob)) == 4 * GEN
+
+
+def test_selling_one_leg_leaves_the_other_legs_void_refund_intact(direct_vm, direct_deploy, chain, direct_alice):
+    """Alice hedges 2 GEN of YES against 18 GEN of NO, then cashes the YES out.
+
+    Her NO leg is untouched, so a VOID owes her the whole 18 GEN she paid for it,
+    on top of what the sale already returned. Charging the sale against one shared
+    cost basis retired all 20 GEN — the small leg's share count was the divisor —
+    and left her claiming nothing for 18 GEN she still had at risk.
+    """
+    market = funded(direct_vm, direct_deploy)
+    with direct_vm.prank(direct_alice):
+        buy(direct_vm, market, "YES", 2 * GEN)
+        buy(direct_vm, market, "NO", 18 * GEN)
+        held = market.position_of(address_of(direct_alice))["yesShares"]
+        quote = market.quote_sell("YES", held)
+        market.sell_yes(held, 0, 0)
+        position = market.position_of(address_of(direct_alice))
+    assert position["yesShares"] == 0 and position["yesCost"] == 0
+    assert position["noCost"] == 18 * GEN
+    assert position["paidCost"] == 18 * GEN
+
+    settle(direct_vm, chain, market, "VOID")
+    with direct_vm.prank(direct_alice):
+        market.claim()
+    assert chain.paid(address_of(direct_alice)) == quote["amountOut"] + 18 * GEN
+
+
+def test_selling_the_larger_leg_in_slices_cannot_inflate_the_void_refund(direct_vm, direct_deploy, chain, direct_alice):
+    """The mirror image, and the direction that costs the pool rather than Alice.
+
+    18 GEN of YES buys far more shares than 2 GEN of NO. Retiring a shared basis
+    in proportion to the *large* leg's share count retires almost nothing per
+    slice, so Alice could cash the YES leg out piece by piece and still claim the
+    full 20 GEN on VOID — collateral the pool never received. She may never take
+    out more than she put in, and the untouched NO leg must survive intact.
+    """
+    market = funded(direct_vm, direct_deploy)
+    with direct_vm.prank(direct_alice):
+        buy(direct_vm, market, "YES", 18 * GEN)
+        buy(direct_vm, market, "NO", 2 * GEN)
+        held = market.position_of(address_of(direct_alice))["yesShares"]
+        for _ in range(9):
+            market.sell_yes(held // 10, 0, 0)
+        position = market.position_of(address_of(direct_alice))
+    # A tenth of the YES leg is left, so a tenth of its basis is, too — to within
+    # the few wei that nine integer slices of `held // 10` leave behind.
+    assert abs(position["yesCost"] - 18 * GEN // 10) < 1000
+    assert position["noCost"] == 2 * GEN
+
+    settle(direct_vm, chain, market, "VOID")
+    with direct_vm.prank(direct_alice):
+        market.claim()
+    # Sales returned GEN and the VOID refunded the rest; together they can never
+    # exceed the 20 GEN she paid in.
+    assert chain.paid(address_of(direct_alice)) <= 20 * GEN
 
 
 def test_lp_residual_cannot_take_the_winners_payout(direct_vm, direct_deploy, chain, direct_alice):

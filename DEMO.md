@@ -1,10 +1,14 @@
 # Verity Markets — evaluation demo
 
-Two things are deployed per market on GenLayer Bradbury:
+Three things are deployed per market on GenLayer Bradbury:
 
 1. a **resolver** (`NumericResolver` / `StructuredFactResolver` / `JudgmentResolver`)
-   that decides YES / NO / VOID from three locked sources, and
-2. a **`PredictionMarket`** that holds the GEN, prices YES/NO with an integer CPMM
+   that decides YES / NO / VOID from three locked sources,
+2. a **dispute resolver** — a second instance of the same contract over the same
+   locked spec, which a challenge appeals to. The market contract will not deploy
+   without one, because a market that cannot adjudicate a challenge could only
+   void on one, and that made the minimum stake a free way to cancel any market.
+3. a **`PredictionMarket`** that holds the GEN, prices YES/NO with an integer CPMM
    and pays out from the resolver's finalized answer.
 
 Markets created through the dApp deploy both and are labelled **ON-CHAIN**.
@@ -17,7 +21,7 @@ never mixed silently.
 
 | Action | Where it runs |
 | --- | --- |
-| Deploy resolver, deploy PredictionMarket | Bradbury transaction, gas in GEN |
+| Deploy resolver, deploy dispute resolver, deploy PredictionMarket | Bradbury transaction, gas in GEN |
 | Add liquidity, buy YES/NO | payable Bradbury transaction; the GEN enters the contract |
 | Sell, claim, claim LP residual | Bradbury transaction; the contract emits a GEN transfer back |
 | Publish preliminary, challenge, finalize | Bradbury transaction (`challenge` is payable) |
@@ -37,9 +41,27 @@ CONFIRM_BRADBURY_DEPLOY=YES npm run genlayer:live-demo
 ```
 
 It locks an observation minute 45 minutes out, deploys a `NumericResolver` bound to
-three exchange candles at exactly that minute, deploys the `PredictionMarket` bound
-to that resolver, then sends real liquidity (0.5 GEN) and a real YES buy (0.1 GEN),
-printing the addresses and the resulting contract state.
+three exchange candles at exactly that minute, deploys a second one as the dispute
+adjudicator, deploys the `PredictionMarket` bound to both, then moves GEN through
+it in **both directions**: real liquidity (0.5 GEN), a real YES buy (0.1 GEN), and
+a sale of a quarter of the resulting position that pays GEN back out. It prints the
+addresses, the resulting contract state and the wei observed returning to the
+deployer.
+
+The sale is the point of the round trip. Taking GEN in only proves the contract can
+receive; until it has paid some back, "it holds your funds" and "it has your funds"
+look identical from outside. `sell_yes` reaches the same `_pay` that `claim()` uses,
+and it can run immediately rather than after the observation time and the challenge
+window.
+
+Payouts are emitted `on: 'finalized'`, not on acceptance, so the shares are retired
+and the collateral drops minutes before the GEN actually arrives. The script waits
+for the deployer's balance to rise rather than for the contract state to change; if
+it stops waiting first it reports `observedOutWei: null` and says so. That means
+re-check the balance — never re-send.
+
+Set `MINUTES_UNTIL_CLOSE=90` if the network is slow: everything up to the sale has
+to happen before the observation time, since trading closes there.
 
 Every step waits for `ACCEPTED` — the point at which a contract becomes callable —
 rather than for finality, which arrives later and is checked by
@@ -59,8 +81,9 @@ CONFIRM_BRADBURY_DEPLOY=YES MARKET_MINUTE=<minute> RESOLVER_TX=0x<hash> \
    Bradbury is added/switched with standard EIP-1193 calls — no MetaMask Snap.
 2. **Create Market → Load evaluation demo.** Set the observation time far enough
    ahead to leave time for trading (30+ minutes).
-3. Click **Create + deploy resolver**. Two MetaMask confirmations follow: the
-   resolver, then the `PredictionMarket` bound to it. The API verifies both
+3. Click **Create + deploy resolver**. Three MetaMask confirmations follow: the
+   resolver, the dispute resolver a challenge will appeal to, then the
+   `PredictionMarket` bound to both. The API verifies the resolver and the market
    against the locked draft before it will record either address.
 4. On the market page, **Provide liquidity** first — a market with no liquidity
    cannot be traded. Then buy YES or NO. The quote comes from `quote_buy()` on the
@@ -71,6 +94,12 @@ CONFIRM_BRADBURY_DEPLOY=YES MARKET_MINUTE=<minute> RESOLVER_TX=0x<hash> \
    (The resolver must have been resolved first — see `npm run genlayer:status`.)
 6. A 10-minute challenge window opens for YES, NO **and** VOID. Either stake 0.1 GEN
    to challenge, or wait for it to expire and click **Finalize**.
+   Challenging opens a second window of the same length and is only half the job:
+   call `resolve()` on the **dispute resolver** before it closes, which anyone may
+   do. If it overturns the published outcome the stake comes back; if it upholds
+   it — or if it never produces a finalized answer — the published outcome stands
+   and the stake goes to the liquidity providers. A challenge on its own cannot
+   void the market.
 7. **Claim payout** — one GEN per winning share, or the exact GEN paid in on a VOID.
    Liquidity providers claim their residual separately.
 
